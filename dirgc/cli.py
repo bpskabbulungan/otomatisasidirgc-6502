@@ -89,9 +89,68 @@ def main():
         parser.error("--start must be <= --end.")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=args.headless)
-        context = browser.new_context()
+        # browser = p.chromium.launch(headless=args.headless)
+        # context = browser.new_context()
+        # page = context.new_page()
+        browser = p.chromium.launch(
+            headless=args.headless,
+            args=[
+                '--disable-blink-features=AutomationControlled',
+                '--disable-dev-shm-usage',
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-infobars',
+                '--window-position=-5,-5',
+                '--disable-extensions',
+                '--user-agent=Mozilla/5.0 (Linux; Android 12; M2010J19CG Build/SKQ1.211202.001; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/143.0.7499.192 Mobile Safari/537.36'
+            ]
+        )
+        
+        # CONTEXT ANDROID WEBVIEW
+        context = browser.new_context(
+            viewport={'width': 390, 'height': 844},
+            screen={'width': 1080, 'height': 2340},
+            device_scale_factor=2.625,
+            is_mobile=True,
+            has_touch=True,
+            user_agent="Mozilla/5.0 (Linux; Android 12; M2010J19CG Build/SKQ1.211202.001; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/143.0.7499.192 Mobile Safari/537.36",
+            extra_http_headers={
+                "Sec-Ch-Ua": '"Android WebView";v="143", "Chromium";v="143", "Not A(Brand";v="24"',
+                "Sec-Ch-Ua-Mobile": "?1",
+                "Sec-Ch-Ua-Platform": '"Android"',
+                "X-Requested-With": "com.matchapro.app"
+            },
+            java_script_enabled=True,
+            permissions=["geolocation"]
+        )
         page = context.new_page()
+        
+        # STEALTH SCRIPTS - HAPUS SEMUA DETECTION FLAGS
+        page.add_init_script("""
+            // Hapus webdriver flag
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            
+            // Override Chrome detection
+            window.chrome = {runtime: {}};
+            
+            // Permissions & languages Android
+            Object.defineProperty(navigator, 'permissions', {
+                get: () => ({query: () => Promise.resolve({state: 'granted'})})});
+            
+            // Plugins empty (mobile)
+            Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
+            
+            // Languages Indonesia
+            Object.defineProperty(navigator, 'languages', {get: () => ['id-ID', 'id', 'en-US', 'en']});
+            
+            // WebGL fingerprint spoof
+            const getParameter = WebGLRenderingContext.getParameter;
+            WebGLRenderingContext.prototype.getParameter = function(parameter) {
+                if (parameter === 37445) return 'Intel Inc.';
+                if (parameter === 37446) return 'Intel(R) UHD Graphics 630';
+                return getParameter(parameter);
+            };
+        """)
 
         monitor = ActivityMonitor(page, args.idle_timeout_ms)
         install_user_activity_tracking(page, monitor.mark_activity)

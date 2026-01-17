@@ -4,10 +4,10 @@ __pycache__/
 venv/
 .env
 
-# config/credentials.json
-# data/*.xlsx
-# data/*.xls
-# data/*.csv
+config/credentials.json
+data/*.xlsx
+data/*.xls
+data/*.csv
 
 *.log
 logs/
