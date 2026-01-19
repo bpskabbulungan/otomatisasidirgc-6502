@@ -4,7 +4,7 @@
 
 Aplikasi CLI berbasis Playwright untuk membantu otomatisasi isian field GC berdasarkan data Excel, dilengkapi log untuk pemantauan. Tersedia GUI berbasis PyQt5 + QFluentWidgets untuk pengguna non-terminal.
 
-Jika ingin langsung menggunakan versi GUI, lihat [packaging](https://github.com/bpskabbulungan/otomatisasidirgc-6502/tree/main/packaging). Tapi, sebaiknya baca dokumentasinya dulu secara lengkap dan cermat sampai selesai bair lebih memahami alur kerjanya.
+Jika ingin langsung menggunakan versi Installer GUI, lihat [packaging](https://github.com/bpskabbulungan/otomatisasidirgc-6502/tree/main/packaging). Tapi, sebaiknya baca dokumentasinya dulu secara lengkap dan cermat sampai selesai bair lebih memahami alur kerjanya.
 
 ## Daftar Isi
 
