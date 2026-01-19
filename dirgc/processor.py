@@ -20,6 +20,7 @@ def process_excel_rows(
     credentials,
     start_row=None,
     end_row=None,
+    progress_callback=None,
 ):
     run_log_path = build_run_log_path()
     run_log_rows = []
@@ -105,6 +106,11 @@ def process_excel_rows(
         start_row=start_row,
         end_row=end_row,
     )
+    if progress_callback:
+        try:
+            progress_callback(0, selected_rows, 0)
+        except Exception:
+            pass
 
     for offset, row in enumerate(rows):
         batch_index = offset + 1
@@ -464,6 +470,15 @@ def process_excel_rows(
                 log_warn("Row summary.", **summary_fields)
             else:
                 log_error("Row summary.", **summary_fields)
+            if progress_callback:
+                try:
+                    progress_callback(
+                        stats["processed"],
+                        selected_rows,
+                        excel_row,
+                    )
+                except Exception:
+                    pass
 
     log_info("Processing completed.", _spacer=True, _divider=True, **stats)
     write_run_log(run_log_rows, run_log_path)

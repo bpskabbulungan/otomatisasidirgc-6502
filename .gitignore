@@ -11,3 +11,10 @@ data/*.csv
 
 *.log
 logs/
+
+build/
+dist/
+*.spec
+playwright-browsers/
+packaging/dist-installer/
+config/gui_settings.json

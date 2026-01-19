@@ -25,6 +25,7 @@ LEVEL_COLORS = {
     "ERROR": "\x1b[31m",
 }
 RESET_COLOR = "\x1b[0m"
+_LOG_HANDLER = None
 
 
 def normalize_log_value(value):
@@ -73,6 +74,9 @@ def log(level, message, **fields):
     timestamp = time.strftime("%H:%M:%S")
     suffix = format_log_fields(fields)
     level_text = colorize_level(level)
+    if _LOG_HANDLER:
+        line = format_log_line(level, message, fields, timestamp)
+        _LOG_HANDLER(line, spacer=spacer, divider=divider)
     if spacer:
         print()
     if divider:
@@ -81,6 +85,20 @@ def log(level, message, **fields):
         print(f"[{timestamp}] {level_text}: {message} | {suffix}")
     else:
         print(f"[{timestamp}] {level_text}: {message}")
+
+
+def format_log_line(level, message, fields, timestamp=None):
+    if timestamp is None:
+        timestamp = time.strftime("%H:%M:%S")
+    suffix = format_log_fields(fields)
+    if suffix:
+        return f"[{timestamp}] {level}: {message} | {suffix}"
+    return f"[{timestamp}] {level}: {message}"
+
+
+def set_log_handler(handler):
+    global _LOG_HANDLER
+    _LOG_HANDLER = handler
 
 
 def log_info(message, **fields):

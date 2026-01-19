@@ -13,21 +13,34 @@ from .settings import (
 
 
 class ActivityMonitor:
-    def __init__(self, page, idle_timeout_ms):
+    def __init__(self, page, idle_timeout_ms, stop_event=None, timeout_scale=1.0):
         self.page = page
         self.idle_timeout_s = idle_timeout_ms / 1000
         self.last_activity = time.monotonic()
+        self.stop_event = stop_event
+        self.timeout_scale = timeout_scale if timeout_scale and timeout_scale > 0 else 1.0
+
+    def _check_stop(self):
+        if self.stop_event and self.stop_event.is_set():
+            raise RuntimeError("Run stopped by user.")
 
     def mark_activity(self, _reason=None):
         self.last_activity = time.monotonic()
 
     def idle_check(self):
+        self._check_stop()
         if time.monotonic() - self.last_activity > self.idle_timeout_s:
             raise RuntimeError(
                 "Idle timeout reached (5 minutes without activity)."
             )
 
+    def scale_timeout(self, timeout_s):
+        if timeout_s is None:
+            return None
+        return timeout_s * self.timeout_scale
+
     def wait_for_condition(self, condition, timeout_s=None, poll_ms=500):
+        timeout_s = self.scale_timeout(timeout_s)
         start = time.monotonic()
         while True:
             if condition():
@@ -38,6 +51,7 @@ class ActivityMonitor:
             self.page.wait_for_timeout(poll_ms)
 
     def bot_click(self, selector_or_locator):
+        self._check_stop()
         self.mark_activity("bot")
         if isinstance(selector_or_locator, str):
             self.page.click(selector_or_locator)
@@ -45,14 +59,17 @@ class ActivityMonitor:
             selector_or_locator.click()
 
     def bot_fill(self, selector, value):
+        self._check_stop()
         self.mark_activity("bot")
         self.page.fill(selector, "" if value is None else str(value))
 
     def bot_select_option(self, selector, **kwargs):
+        self._check_stop()
         self.mark_activity("bot")
         self.page.select_option(selector, **kwargs)
 
     def bot_goto(self, url):
+        self._check_stop()
         self.mark_activity("bot")
         self.page.goto(url, wait_until="domcontentloaded")
 
@@ -177,7 +194,9 @@ def ensure_on_dirgc(
                 locator = page.locator(selector)
                 if locator.count() > 0 and locator.first.is_visible():
                     return False
-            if time.monotonic() - start > AUTO_LOGIN_RESULT_TIMEOUT_S:
+            if time.monotonic() - start > monitor.scale_timeout(
+                AUTO_LOGIN_RESULT_TIMEOUT_S
+            ):
                 return False
             monitor.idle_check()
             page.wait_for_timeout(500)

@@ -2,7 +2,9 @@
 
 ## Ringkasan
 
-Software CLI berbasis Playwright untuk membantu otomatisasi isian field GC berdasarkan data Excel dan disertai log untuk monitoring.
+Software CLI berbasis Playwright untuk membantu otomatisasi isian field GC berdasarkan data Excel dan disertai log untuk monitoring. Tersedia GUI berbasis PyQt5 + QFluentWidgets untuk pengguna non-terminal.
+
+Jika langsung ingin menggunakan versi GUI -> [Build Exe/Installer GUI](#build-exeinstaller-untuk-gui)
 
 ## Daftar Isi
 
@@ -17,6 +19,7 @@ Software CLI berbasis Playwright untuk membantu otomatisasi isian field GC berda
 - [Cara Menjalankan](#cara-menjalankan)
 - [Catatan](#catatan)
 - [Output Log Excel](#output-log-excel)
+- [Build Exe/Installer GUI](#build-exeinstaller-untuk-gui)
 - [Kredit](#kredit)
 
 ## Ringkasan Fitur
@@ -26,16 +29,19 @@ Software CLI berbasis Playwright untuk membantu otomatisasi isian field GC berda
 - Pengisian Hasil GC, latitude, dan longitude dengan validasi sederhana.
 - Opsi pemrosesan parsial lewat `--start` dan `--end`.
 - Log terminal terstruktur dan file log Excel per run.
+- GUI modern untuk menjalankan proses tanpa terminal.
 
 ## Struktur Folder
 
 ```text
 .
 |- dirgc/                 # Modul utama aplikasi
+|  `- gui/                # GUI (PyQt5 + QFluentWidgets)
 |- config/                # Konfigurasi lokal (contoh: credentials)
 |- data/                  # File input (Excel)
 |- logs/                  # Output log per run (Excel)
 |- run_dirgc.py           # Entry point CLI (wrapper)
+|- run_dirgc_gui.py       # Entry point GUI
 |- requirements.txt
 `- README.md
 ```
@@ -66,7 +72,7 @@ playwright install chromium
 
 ## Konfigurasi Akun SSO
 
-Letakkan file JSON di `config/credentials.json`:
+Untuk CLI, letakkan file JSON di `config/credentials.json`:
 
 ```json
 {
@@ -82,6 +88,7 @@ Atau gunakan environment variables:
 
 Pencarian file kredensial juga mendukung fallback `credentials.json` di root project.
 Jika keduanya tersedia, isi file akan diprioritaskan dibanding environment variables.
+Untuk GUI, isi kredensial lewat menu `Akun SSO` (tidak disimpan ke file).
 
 ## File Excel
 
@@ -108,6 +115,16 @@ Jika kolom `hasil_gc` tidak ditemukan, sistem memakai kolom ke-6 (`keberadaanusa
 
 ## Cara Menjalankan
 
+GUI (direkomendasikan untuk pengguna non-terminal):
+
+```bash
+python run_dirgc_gui.py
+```
+
+Di GUI, buka menu `Akun SSO` untuk mengisi username dan password jika ingin auto-login.
+
+CLI:
+
 ```bash
 python run_dirgc.py
 ```
@@ -129,6 +146,7 @@ Opsi tambahan:
 
 - `--headless` untuk menjalankan browser tanpa UI (SSO sering butuh non-headless).
 - `--idle-timeout-ms` untuk batas idle (default 300000 / 5 menit).
+- `--web-timeout-s` untuk toleransi loading web (default 30 detik).
 - `--manual-only` untuk selalu login manual (tanpa auto-fill kredensial).
 
 Auto-login akan mencoba kredensial terlebih dulu; jika gagal/OTP muncul, akan beralih ke manual login.
@@ -156,6 +174,23 @@ Kolom log:
 - `catatan`
 
 Nilai `skipped` biasanya muncul jika data sudah GC atau terdeteksi duplikat.
+
+### Build EXE/Installer untuk GUI
+
+1. Build EXE (portable):
+
+```powershell
+.\packaging\build_exe.ps1
+```
+
+2. Build installer (wizard):
+
+- Install Inno Setup.
+- Jalankan compiler:
+
+```powershell
+& "C:\Users\User\AppData\Local\Programs\Inno Setup 6\ISCC.exe" .\packaging\installer.iss
+```
 
 ## Kredit
 
