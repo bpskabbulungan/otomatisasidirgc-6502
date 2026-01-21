@@ -37,7 +37,9 @@ def process_excel_rows(
                 "alamat": "",
                 "keberadaanusaha_gc": "",
                 "latitude": "",
+                "latitude_source": "",
                 "longitude": "",
+                "longitude_source": "",
                 "status": "error",
                 "catatan": str(exc),
             }
@@ -126,6 +128,10 @@ def process_excel_rows(
         latitude = row["latitude"]
         longitude = row["longitude"]
         hasil_gc = row["hasil_gc"]
+        latitude_value = latitude or ""
+        longitude_value = longitude or ""
+        latitude_source = "unknown"
+        longitude_source = "unknown"
 
         log_info(
             "Processing row.",
@@ -265,19 +271,25 @@ def process_excel_rows(
                         idsbr=idsbr or "-",
                         field=field_name,
                     )
-                    return
+                    return "", "missing"
                 try:
                     current_value = locator.first.input_value()
                 except Exception:
                     current_value = ""
-                if current_value and str(current_value).strip():
-                    return
+                current_value = (current_value or "").strip()
+                if current_value:
+                    return current_value, "web"
                 if not value:
-                    return
+                    return "", "empty"
                 monitor.bot_fill(selector, value)
+                return str(value).strip(), "excel"
 
-            safe_fill("#tt_latitude_cek_user", latitude, "latitude")
-            safe_fill("#tt_longitude_cek_user", longitude, "longitude")
+            latitude_value, latitude_source = safe_fill(
+                "#tt_latitude_cek_user", latitude, "latitude"
+            )
+            longitude_value, longitude_source = safe_fill(
+                "#tt_longitude_cek_user", longitude, "longitude"
+            )
 
             def ensure_edit_field(toggle_selector, input_selector, value, field_name):
                 if not value:
@@ -423,7 +435,7 @@ def process_excel_rows(
             monitor.wait_for_condition(find_swal, timeout_s=15)
 
             if swal_result == "confirm":
-                if not latitude and not longitude:
+                if not latitude_value and not longitude_value:
                     confirm_popup = page.locator(
                         ".swal2-popup", has_text=confirm_text
                     )
@@ -523,8 +535,10 @@ def process_excel_rows(
                     "nama_usaha": nama_usaha or "",
                     "alamat": alamat or "",
                     "keberadaanusaha_gc": hasil_gc if hasil_gc is not None else "",
-                    "latitude": latitude or "",
-                    "longitude": longitude or "",
+                    "latitude": latitude_value or "",
+                    "latitude_source": latitude_source or "",
+                    "longitude": longitude_value or "",
+                    "longitude_source": longitude_source or "",
                     "status": status or "error",
                     "catatan": note,
                 }

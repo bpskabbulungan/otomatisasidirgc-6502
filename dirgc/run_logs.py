@@ -40,7 +40,9 @@ def write_run_log(rows, output_path):
         "alamat",
         "keberadaanusaha_gc",
         "latitude",
+        "latitude_source",
         "longitude",
+        "longitude_source",
         "status",
         "catatan",
     ]

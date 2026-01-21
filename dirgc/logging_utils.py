@@ -58,7 +58,10 @@ def format_log_fields(fields):
 
 
 def colorize_level(level):
-    if not sys.stdout.isatty():
+    if sys.stdout is None:
+        return level
+    isatty = getattr(sys.stdout, "isatty", None)
+    if not callable(isatty) or not isatty():
         return level
     if os.getenv("NO_COLOR"):
         return level

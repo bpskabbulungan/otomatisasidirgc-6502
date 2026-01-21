@@ -225,7 +225,9 @@ Kolom log:
 - `alamat`
 - `keberadaanusaha_gc`
 - `latitude`
+- `latitude_source` (web/excel/empty/missing/unknown)
 - `longitude`
+- `longitude_source` (web/excel/empty/missing/unknown)
 - `status` (berhasil/gagal/error/skipped)
 - `catatan`
 
