@@ -6,7 +6,9 @@ Aplikasi CLI berbasis Playwright untuk membantu otomatisasi isian field GC berda
 
 Tersedia dua versi: GUI dan Script atau Terminal. Alur singkatnya: mulai dari [Persiapan (Python dan Git)](#persiapan-python-dan-git), lanjut ke [Unduh Project](#unduh-project) dan [Instal Dependensi](#instal-dependensi), siapkan [File Excel](#file-excel), lalu jalankan via [GUI](#cara-menjalankan---gui) atau [Script atau Terminal](#cara-menjalankan---script-atau-terminal), jangan lupa [Konfigurasi Akun SSO](#konfigurasi-akun-sso) jika memilih via terminal.
 
-Jika ingin langsung menggunakan versi Installer GUI, lihat [packaging](https://github.com/bpskabbulungan/otomatisasidirgc-6502/tree/main/packaging). Namun, sebaiknya baca dokumentasi ini dulu agar alur kerjanya lebih jelas.
+Jika ingin langsung menggunakan versi Installer GUI, lihat [packaging](https://github.com/bpskabbulungan/otomatisasidirgc-6502/tree/main/packaging). Tersedia juga versi .exe yang siap pakai, lihat di https://drive.google.com/file/d/1rewDhHUY_tDCxnPDB52lAVMijJvz1sDw/view?usp=sharing. 
+
+Namun, sebaiknya baca dokumentasi ini dulu agar alur kerjanya lebih jelas.
 
 ## Daftar Isi
 
