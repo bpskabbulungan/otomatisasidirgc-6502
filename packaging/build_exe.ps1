@@ -21,7 +21,7 @@ if (Test-Path $fontsPath) {
 pyinstaller `
   --noconfirm `
   --clean `
-  --name "DIRGC-Automation" `
+  --name "Otomatisasidirgc-6502" `
   --windowed `
   --onefile `
   --collect-all qfluentwidgets `

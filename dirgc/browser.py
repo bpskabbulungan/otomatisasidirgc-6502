@@ -401,7 +401,7 @@ def _normalize_hasil_label(text):
     if text is None:
         return ""
     cleaned = " ".join(str(text).split())
-    cleaned = re.sub(r"^\\d+\\s*[\\.\\)\\-:]\\s*", "", cleaned)
+    cleaned = re.sub(r"^\d+\s*[.\)\-:]\s*", "", cleaned)
     return cleaned.strip().lower()
 
 
