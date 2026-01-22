@@ -147,7 +147,11 @@ Setelah GUI terbuka:
 
 1. Buka menu `Akun SSO`, isi username dan password jika ingin auto-login.
 2. Pilih file Excel (atau pastikan file default sudah ada di `data/`).
-3. Klik mulai/submit sesuai tombol yang tersedia pada GUI.
+3. Buka menu `Run` untuk input baru, atau menu `Update` untuk memperbarui data.
+4. Klik tombol mulai/update sesuai menu yang dipilih.
+5. Di menu `Update`, pilih field yang ingin diperbarui (Hasil GC, Nama, Alamat, Koordinat).
+   Jika field dipilih tetapi nilai Excel kosong, baris akan ditolak (status `gagal`).
+   Untuk koordinat, boleh isi salah satu saja (latitude atau longitude).
 
 ## Cara Menjalankan - Script atau Terminal
 
@@ -186,7 +190,9 @@ Perintah di atas hanya memproses baris 1 sampai 5 (1-based, inklusif).
 - `--dirgc-only` untuk berhenti di halaman DIRGC (tanpa filter/input).
 - `--edit-nama-alamat` untuk mengaktifkan toggle edit Nama/Alamat Usaha dan isi dari Excel.
 - `--keep-open` untuk menahan browser tetap terbuka setelah proses.
+- `--update-mode` untuk menggunakan tombol Edit Hasil (update data).
 - `--prefer-web-coords` untuk mempertahankan koordinat yang sudah terisi di web.
+- `--update-fields` untuk memilih field yang di-update (contoh: `hasil_gc,nama_usaha,alamat,koordinat`).
 
 Auto-login akan mencoba kredensial terlebih dulu; jika gagal/OTP muncul, akan beralih ke manual login.
 Secara default, koordinat diisi dari Excel (jika ada), meskipun web sudah berisi.
@@ -230,8 +236,18 @@ Kolom log:
 - `keberadaanusaha_gc`
 - `latitude`
 - `latitude_source` (web/excel/empty/missing/unknown)
+- `latitude_before`
+- `latitude_after`
 - `longitude`
 - `longitude_source` (web/excel/empty/missing/unknown)
+- `longitude_before`
+- `longitude_after`
+- `hasil_gc_before`
+- `hasil_gc_after`
+- `nama_usaha_before`
+- `nama_usaha_after`
+- `alamat_before`
+- `alamat_after`
 - `status` (berhasil/gagal/error/skipped)
 - `catatan`
 

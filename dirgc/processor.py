@@ -20,6 +20,8 @@ def process_excel_rows(
     credentials,
     edit_nama_alamat=False,
     prefer_excel_coords=True,
+    update_mode=False,
+    update_fields=None,
     start_row=None,
     end_row=None,
     progress_callback=None,
@@ -122,6 +124,7 @@ def process_excel_rows(
         stats["processed"] += 1
         status = None
         note = ""
+        extra_notes = []
 
         idsbr = row["idsbr"]
         nama_usaha = row["nama_usaha"]
@@ -133,6 +136,54 @@ def process_excel_rows(
         longitude_value = longitude or ""
         latitude_source = "unknown"
         longitude_source = "unknown"
+        latitude_before = ""
+        latitude_after = ""
+        longitude_before = ""
+        longitude_after = ""
+        nama_before = ""
+        nama_after = ""
+        alamat_before = ""
+        alamat_after = ""
+        hasil_gc_before = ""
+        hasil_gc_after = ""
+
+        update_fields_set = None
+        if update_mode:
+            if isinstance(update_fields, (list, tuple, set)):
+                update_fields_set = {
+                    str(item).strip().lower()
+                    for item in update_fields
+                    if str(item).strip()
+                }
+            elif update_fields is not None:
+                update_fields_set = set()
+        update_hasil_gc = (
+            not update_mode
+            or update_fields_set is None
+            or "hasil_gc" in update_fields_set
+        )
+        update_nama = (
+            not update_mode
+            or update_fields_set is None
+            or "nama_usaha" in update_fields_set
+        )
+        update_alamat = (
+            not update_mode
+            or update_fields_set is None
+            or "alamat" in update_fields_set
+        )
+        update_lat = (
+            not update_mode
+            or update_fields_set is None
+            or "latitude" in update_fields_set
+            or "koordinat" in update_fields_set
+        )
+        update_lon = (
+            not update_mode
+            or update_fields_set is None
+            or "longitude" in update_fields_set
+            or "koordinat" in update_fields_set
+        )
 
         log_info(
             "Processing row.",
@@ -151,6 +202,49 @@ def process_excel_rows(
         )
 
         try:
+            if update_mode:
+                missing_fields = []
+                lat_text = (latitude or "").strip()
+                lon_text = (longitude or "").strip()
+                if update_hasil_gc and hasil_gc is None:
+                    missing_fields.append("hasil_gc")
+                if update_nama and not (nama_usaha or "").strip():
+                    missing_fields.append("nama_usaha")
+                if update_alamat and not (alamat or "").strip():
+                    missing_fields.append("alamat")
+                if update_lat and update_lon:
+                    if not lat_text and not lon_text:
+                        missing_fields.append("koordinat")
+                    elif (lat_text and not lon_text) or (lon_text and not lat_text):
+                        partial_label = (
+                            "latitude"
+                            if lat_text and not lon_text
+                            else "longitude"
+                        )
+                        log_warn(
+                            "Update koordinat parsial: hanya satu nilai terisi.",
+                            idsbr=idsbr or "-",
+                            filled=partial_label,
+                        )
+                        extra_notes.append(
+                            f"Koordinat parsial (hanya {partial_label})"
+                        )
+                elif update_lat and not lat_text:
+                    missing_fields.append("latitude")
+                elif update_lon and not lon_text:
+                    missing_fields.append("longitude")
+
+                if missing_fields:
+                    missing_label = ", ".join(missing_fields)
+                    log_warn(
+                        "Update ditolak: field kosong di Excel.",
+                        idsbr=idsbr or "-",
+                        fields=missing_label,
+                    )
+                    status = "gagal"
+                    note = f"Update ditolak: field kosong ({missing_label})"
+                    continue
+
             log_info(
                 "Applying filter.",
                 idsbr=idsbr or "-",
@@ -180,15 +274,18 @@ def process_excel_rows(
             if card_scope.count() == 0:
                 card_scope = page
 
-            if (
-                card_scope.locator(".gc-badge", has_text="Sudah GC").count()
-                > 0
-            ):
-                log_info("Skipped: Sudah GC.", idsbr=idsbr or "-")
-                stats["skipped_gc"] += 1
-                status = "skipped"
-                note = "Sudah GC"
-                continue
+            if not update_mode:
+                if (
+                    card_scope.locator(
+                        ".gc-badge", has_text="Sudah GC"
+                    ).count()
+                    > 0
+                ):
+                    log_info("Skipped: Sudah GC.", idsbr=idsbr or "-")
+                    stats["skipped_gc"] += 1
+                    status = "skipped"
+                    note = "Sudah GC"
+                    continue
 
             if card_scope.locator(
                 ".usaha-status.tidak-aktif", has_text="Duplikat"
@@ -199,42 +296,49 @@ def process_excel_rows(
                 note = "Duplikat"
                 continue
 
-            tandai_locator = page.locator(".btn-tandai")
-            if tandai_locator.count() == 0:
+            action_selector = ".btn-gc-edit" if update_mode else ".btn-tandai"
+            action_label = "Edit Hasil" if update_mode else "Tandai"
+            action_locator = page.locator(action_selector)
+            if action_locator.count() == 0:
+                missing_note = (
+                    "Tombol Edit Hasil tidak ditemukan (kemungkinan belum GC; gunakan menu Run)."
+                    if update_mode
+                    else "Tombol Tandai tidak ditemukan."
+                )
                 log_warn(
-                    "Tombol Tandai tidak ditemukan; skipping.",
+                    f"Tombol {action_label} tidak ditemukan; skipping.",
                     idsbr=idsbr or "-",
                 )
                 stats["skipped_no_tandai"] += 1
                 status = "gagal"
-                note = "Tombol Tandai tidak ditemukan"
+                note = missing_note
                 continue
-            if not tandai_locator.first.is_visible():
+            if not action_locator.first.is_visible():
                 log_warn(
-                    "Tombol Tandai tidak terlihat; skipping.",
+                    f"Tombol {action_label} tidak terlihat; skipping.",
                     idsbr=idsbr or "-",
                 )
                 stats["skipped_no_tandai"] += 1
                 status = "gagal"
-                note = "Tombol Tandai tidak terlihat"
+                note = f"Tombol {action_label} tidak terlihat"
                 continue
 
             wait_for_block_ui_clear(page, monitor, timeout_s=15)
             try:
-                tandai_locator.first.scroll_into_view_if_needed()
+                action_locator.first.scroll_into_view_if_needed()
             except Exception:
                 pass
             try:
-                monitor.bot_click(tandai_locator.first)
+                monitor.bot_click(action_locator.first)
             except Exception as exc:
                 log_warn(
-                    "Tombol Tandai gagal diklik; skipping.",
+                    f"Tombol {action_label} gagal diklik; skipping.",
                     idsbr=idsbr or "-",
                     error=str(exc),
                 )
                 stats["skipped_no_tandai"] += 1
                 status = "gagal"
-                note = "Tombol Tandai gagal diklik"
+                note = f"Tombol {action_label} gagal diklik"
                 continue
             form_ready = monitor.wait_for_condition(
                 lambda: page.locator("#tt_hasil_gc").count() > 0,
@@ -250,21 +354,36 @@ def process_excel_rows(
                 note = "Form Hasil GC tidak muncul"
                 continue
 
-            if hasil_gc_select(page, monitor, hasil_gc):
-                log_info(
-                    "Hasil GC set.", hasil_gc=hasil_gc, idsbr=idsbr or "-"
-                )
-                stats["hasil_gc_set"] += 1
+            if update_hasil_gc:
+                select_locator = page.locator("#tt_hasil_gc")
+                try:
+                    hasil_gc_before = select_locator.first.input_value() or ""
+                except Exception:
+                    hasil_gc_before = ""
+                if hasil_gc_select(page, monitor, hasil_gc):
+                    hasil_gc_after = str(hasil_gc) if hasil_gc is not None else ""
+                    log_info(
+                        "Hasil GC set.", hasil_gc=hasil_gc, idsbr=idsbr or "-"
+                    )
+                    stats["hasil_gc_set"] += 1
+                else:
+                    hasil_gc_after = hasil_gc_before
+                    log_warn(
+                        "Hasil GC tidak diisi (kode tidak valid/kosong).",
+                        idsbr=idsbr or "-",
+                    )
+                    stats["hasil_gc_skipped"] += 1
+                    status = "gagal"
+                    note = "Hasil GC tidak valid/kosong"
             else:
-                log_warn(
-                    "Hasil GC tidak diisi (kode tidak valid/kosong).",
-                    idsbr=idsbr or "-",
-                )
-                stats["hasil_gc_skipped"] += 1
-                status = "gagal"
-                note = "Hasil GC tidak valid/kosong"
+                select_locator = page.locator("#tt_hasil_gc")
+                try:
+                    hasil_gc_before = select_locator.first.input_value() or ""
+                except Exception:
+                    hasil_gc_before = ""
+                hasil_gc_after = hasil_gc_before
 
-            def safe_fill(selector, value, field_name):
+            def safe_fill(selector, value, field_name, allow_overwrite):
                 locator = page.locator(selector)
                 if locator.count() == 0 or not locator.first.is_visible():
                     log_warn(
@@ -272,42 +391,53 @@ def process_excel_rows(
                         idsbr=idsbr or "-",
                         field=field_name,
                     )
-                    return "", "missing"
+                    return "", "missing", "", ""
                 try:
                     current_value = locator.first.input_value()
                 except Exception:
                     current_value = ""
                 current_value = (current_value or "").strip()
-                desired_value = ""
-                if value is not None:
-                    desired_value = str(value).strip()
+                desired_value = str(value).strip() if value is not None else ""
 
-                if prefer_excel_coords:
+                if allow_overwrite:
                     if desired_value:
                         if current_value != desired_value:
                             monitor.bot_fill(selector, desired_value)
-                        return desired_value, "excel"
+                        return desired_value, "excel", current_value, desired_value
                     if current_value:
-                        return current_value, "web"
-                    return "", "empty"
+                        return current_value, "web", current_value, current_value
+                    return "", "empty", current_value, ""
 
                 if current_value:
-                    return current_value, "web"
+                    return current_value, "web", current_value, current_value
                 if not desired_value:
-                    return "", "empty"
+                    return "", "empty", current_value, ""
                 monitor.bot_fill(selector, desired_value)
-                return desired_value, "excel"
+                return desired_value, "excel", current_value, desired_value
 
-            latitude_value, latitude_source = safe_fill(
-                "#tt_latitude_cek_user", latitude, "latitude"
+            lat_value = latitude if update_lat else None
+            lon_value = longitude if update_lon else None
+            allow_overwrite_lat = prefer_excel_coords if update_lat else False
+            allow_overwrite_lon = prefer_excel_coords if update_lon else False
+            latitude_value, latitude_source, latitude_before, latitude_after = (
+                safe_fill(
+                    "#tt_latitude_cek_user",
+                    lat_value,
+                    "latitude",
+                    allow_overwrite_lat,
+                )
             )
-            longitude_value, longitude_source = safe_fill(
-                "#tt_longitude_cek_user", longitude, "longitude"
+            longitude_value, longitude_source, longitude_before, longitude_after = (
+                safe_fill(
+                    "#tt_longitude_cek_user",
+                    lon_value,
+                    "longitude",
+                    allow_overwrite_lon,
+                )
             )
 
             def ensure_edit_field(toggle_selector, input_selector, value, field_name):
-                if not value:
-                    return
+                desired_value = str(value).strip() if value else ""
                 toggle = page.locator(toggle_selector)
                 if toggle.count() == 0 or not toggle.first.is_visible():
                     log_warn(
@@ -315,7 +445,7 @@ def process_excel_rows(
                         idsbr=idsbr or "-",
                         field=field_name,
                     )
-                    return
+                    return "", ""
                 try:
                     toggle_checked = toggle.first.is_checked()
                 except Exception:
@@ -330,7 +460,7 @@ def process_excel_rows(
                             field=field_name,
                             error=str(exc),
                         )
-                        return
+                        return "", ""
 
                 input_locator = page.locator(input_selector)
                 if (
@@ -342,7 +472,7 @@ def process_excel_rows(
                         idsbr=idsbr or "-",
                         field=field_name,
                     )
-                    return
+                    return "", ""
                 if not monitor.wait_for_condition(
                     lambda: input_locator.count() > 0
                     and input_locator.first.is_editable(),
@@ -353,18 +483,35 @@ def process_excel_rows(
                         idsbr=idsbr or "-",
                         field=field_name,
                     )
-                    return
+                    return "", ""
                 try:
                     current_value = input_locator.first.input_value()
                 except Exception:
                     current_value = ""
                 current_value = (current_value or "").strip()
-                desired_value = str(value).strip()
+                if not desired_value:
+                    return current_value, current_value
                 if current_value == desired_value:
-                    return
+                    return current_value, desired_value
                 monitor.bot_fill(input_selector, desired_value)
+                return current_value, desired_value
 
-            if edit_nama_alamat:
+            if update_mode:
+                if update_nama:
+                    nama_before, nama_after = ensure_edit_field(
+                        "#toggle_edit_nama",
+                        "#tt_nama_usaha_gc",
+                        nama_usaha,
+                        "nama_usaha",
+                    )
+                if update_alamat:
+                    alamat_before, alamat_after = ensure_edit_field(
+                        "#toggle_edit_alamat",
+                        "#tt_alamat_usaha_gc",
+                        alamat,
+                        "alamat",
+                    )
+            elif edit_nama_alamat:
                 ensure_edit_field(
                     "#toggle_edit_nama",
                     "#tt_nama_usaha_gc",
@@ -542,6 +689,13 @@ def process_excel_rows(
             status = "error"
             note = str(exc)
         finally:
+            combined_note = note or ""
+            if extra_notes:
+                extra_text = "; ".join(extra_notes)
+                if combined_note:
+                    combined_note = f"{combined_note}; {extra_text}"
+                else:
+                    combined_note = extra_text
             run_log_rows.append(
                 {
                     "no": excel_row,
@@ -551,14 +705,24 @@ def process_excel_rows(
                     "keberadaanusaha_gc": hasil_gc if hasil_gc is not None else "",
                     "latitude": latitude_value or "",
                     "latitude_source": latitude_source or "",
+                    "latitude_before": latitude_before or "",
+                    "latitude_after": latitude_after or "",
                     "longitude": longitude_value or "",
                     "longitude_source": longitude_source or "",
+                    "longitude_before": longitude_before or "",
+                    "longitude_after": longitude_after or "",
+                    "hasil_gc_before": hasil_gc_before or "",
+                    "hasil_gc_after": hasil_gc_after or "",
+                    "nama_usaha_before": nama_before or "",
+                    "nama_usaha_after": nama_after or "",
+                    "alamat_before": alamat_before or "",
+                    "alamat_after": alamat_after or "",
                     "status": status or "error",
-                    "catatan": note,
+                    "catatan": combined_note,
                 }
             )
             summary_status = status or "error"
-            summary_note = note or "-"
+            summary_note = combined_note or "-"
             summary_fields = {
                 "row": batch_index,
                 "row_excel": excel_row,

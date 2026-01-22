@@ -92,6 +92,18 @@ def build_parser():
         action="store_true",
         help="Aktifkan toggle edit Nama/Alamat Usaha dan isi dari Excel.",
     )
+    parser.add_argument(
+        "--update-mode",
+        action="store_true",
+        help="Gunakan mode update data (klik Edit Hasil).",
+    )
+    parser.add_argument(
+        "--update-fields",
+        help=(
+            "Daftar field yang di-update saat --update-mode, "
+            "pisahkan dengan koma (hasil_gc,nama_usaha,alamat,latitude,longitude,koordinat)."
+        ),
+    )
     coord_group = parser.add_mutually_exclusive_group()
     coord_group.add_argument(
         "--prefer-excel-coords",
@@ -135,6 +147,8 @@ def run_dirgc(
     dirgc_only=False,
     edit_nama_alamat=False,
     prefer_excel_coords=True,
+    update_mode=False,
+    update_fields=None,
     credentials=None,
     stop_event=None,
     progress_callback=None,
@@ -247,6 +261,8 @@ def run_dirgc(
                 credentials=credentials_value,
                 edit_nama_alamat=edit_nama_alamat,
                 prefer_excel_coords=prefer_excel_coords,
+                update_mode=update_mode,
+                update_fields=update_fields,
                 start_row=start_row,
                 end_row=end_row,
                 progress_callback=progress_callback,
@@ -271,6 +287,13 @@ def main():
     except ValueError as exc:
         parser.error(str(exc))
 
+    update_fields = None
+    if args.update_fields:
+        raw_fields = [item.strip().lower() for item in args.update_fields.split(",")]
+        raw_fields = [item for item in raw_fields if item]
+        if raw_fields:
+            update_fields = raw_fields
+
     run_dirgc(
         headless=args.headless,
         manual_only=args.manual_only,
@@ -284,6 +307,8 @@ def main():
         dirgc_only=args.dirgc_only,
         edit_nama_alamat=args.edit_nama_alamat,
         prefer_excel_coords=not args.prefer_web_coords,
+        update_mode=args.update_mode,
+        update_fields=update_fields,
     )
 
 

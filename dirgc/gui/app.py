@@ -192,6 +192,8 @@ class RunConfig:
     dirgc_only: bool
     edit_nama_alamat: bool
     prefer_excel_coords: bool
+    update_mode: bool
+    update_fields: Optional[list]
     use_sso: bool
     sso_username: Optional[str]
     sso_password: Optional[str]
@@ -239,6 +241,8 @@ class RunWorker(QThread):
                 dirgc_only=self._config.dirgc_only,
                 edit_nama_alamat=self._config.edit_nama_alamat,
                 prefer_excel_coords=self._config.prefer_excel_coords,
+                update_mode=self._config.update_mode,
+                update_fields=self._config.update_fields,
                 credentials=credentials,
                 stop_event=self._stop_event,
                 progress_callback=self._emit_progress,
@@ -267,11 +271,36 @@ class RunWorker(QThread):
 
 
 class RunPage(QWidget):
-    def __init__(self, sso_page=None, parent=None):
+    def __init__(
+        self,
+        sso_page=None,
+        parent=None,
+        *,
+        update_mode_default=False,
+        title_text="Run DIRGC",
+        subtitle_text="Atur file, opsi, lalu jalankan proses.",
+        run_label="Mulai",
+        run_card_title="Run",
+        confirm_title="Mulai proses",
+        confirm_message="Mulai proses sekarang?",
+        settings_key="options",
+    ):
         super().__init__(parent)
         self._worker = None
         self._sso_page = sso_page
         self._recent_excels = []
+        self._update_mode_default = bool(update_mode_default)
+        self._confirm_start_title = confirm_title
+        self._confirm_start_message = confirm_message
+        self._run_label = run_label
+        self._run_card_title = run_card_title
+        self._settings_key = settings_key
+        self._update_fields = {}
+        self._show_dirgc_only = not self._update_mode_default
+        self._show_edit_nama_alamat = not self._update_mode_default
+        self._show_prefer_web_coords = not self._update_mode_default
+        self._show_range = True
+        self._show_keep_open = True
 
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
@@ -279,8 +308,8 @@ class RunPage(QWidget):
         scroll, layout = build_scroll_area(self)
         outer_layout.addWidget(scroll)
 
-        title = TitleLabel("Run DIRGC")
-        subtitle = BodyLabel("Atur file, opsi, lalu jalankan proses.")
+        title = TitleLabel(title_text)
+        subtitle = BodyLabel(subtitle_text)
         layout.addWidget(title)
         layout.addWidget(subtitle)
 
@@ -378,34 +407,75 @@ class RunPage(QWidget):
         self.dirgc_only_switch.checkedChanged.connect(
             self._toggle_dirgc_only
         )
-        card_layout.addWidget(
-            self._make_option_row(
-                "Hanya sampai halaman DIRGC",
-                "ON: login lalu berhenti di halaman DIRGC tanpa filter/input.",
-                self.dirgc_only_switch,
-            )
+        dirgc_row = self._make_option_row(
+            "Hanya sampai halaman DIRGC",
+            "ON: login lalu berhenti di halaman DIRGC tanpa filter/input.",
+            self.dirgc_only_switch,
         )
+        card_layout.addWidget(dirgc_row)
+        dirgc_row.setVisible(self._show_dirgc_only)
 
         self.edit_nama_alamat_switch = SwitchButton()
         self.edit_nama_alamat_switch.setChecked(False)
-        card_layout.addWidget(
-            self._make_option_row(
-                "Edit Nama/Alamat Usaha dari Excel",
-                "ON: aktifkan toggle edit di popup dan isi dari data Excel.",
-                self.edit_nama_alamat_switch,
-            )
+        edit_row = self._make_option_row(
+            "Edit Nama/Alamat Usaha dari Excel",
+            "ON: aktifkan toggle edit di popup dan isi dari data Excel.",
+            self.edit_nama_alamat_switch,
         )
+        card_layout.addWidget(edit_row)
+        edit_row.setVisible(self._show_edit_nama_alamat)
 
         self.prefer_web_coords_switch = SwitchButton()
         self.prefer_web_coords_switch.setChecked(False)
-        card_layout.addWidget(
-            self._make_option_row(
-                "Prioritaskan koordinat web",
-                "ON: jika koordinat web sudah terisi, tidak dioverwrite. "
-                "OFF: gunakan koordinat dari Excel.",
-                self.prefer_web_coords_switch,
-            )
+        coords_row = self._make_option_row(
+            "Prioritaskan koordinat web",
+            "ON: jika koordinat web sudah terisi, tidak dioverwrite. "
+            "OFF: gunakan koordinat dari Excel.",
+            self.prefer_web_coords_switch,
         )
+        card_layout.addWidget(coords_row)
+        coords_row.setVisible(self._show_prefer_web_coords)
+
+        if self._update_mode_default:
+            card_layout.addWidget(SubtitleLabel("Field update"))
+
+            self._update_fields = {
+                "hasil_gc": SwitchButton(),
+                "nama_usaha": SwitchButton(),
+                "alamat": SwitchButton(),
+                "koordinat": SwitchButton(),
+            }
+            for switch in self._update_fields.values():
+                switch.setChecked(True)
+
+            card_layout.addWidget(
+                self._make_option_row(
+                    "Hasil GC",
+                    "ON: perbarui nilai Hasil GC sesuai Excel.",
+                    self._update_fields["hasil_gc"],
+                )
+            )
+            card_layout.addWidget(
+                self._make_option_row(
+                    "Nama usaha",
+                    "ON: perbarui nama usaha dari Excel.",
+                    self._update_fields["nama_usaha"],
+                )
+            )
+            card_layout.addWidget(
+                self._make_option_row(
+                    "Alamat usaha",
+                    "ON: perbarui alamat usaha dari Excel.",
+                    self._update_fields["alamat"],
+                )
+            )
+            card_layout.addWidget(
+                self._make_option_row(
+                    "Koordinat (Lat/Long)",
+                    "ON: perbarui latitude dan longitude dari Excel.",
+                    self._update_fields["koordinat"],
+                )
+            )
 
         range_row = QWidget()
         range_layout = QHBoxLayout(range_row)
@@ -419,6 +489,7 @@ class RunPage(QWidget):
         range_layout.addStretch()
         range_layout.addWidget(self.range_switch)
         card_layout.addWidget(range_row)
+        range_row.setVisible(self._show_range)
 
         range_inputs = QWidget()
         range_inputs_layout = QHBoxLayout(range_inputs)
@@ -439,6 +510,7 @@ class RunPage(QWidget):
         range_inputs_layout.addWidget(self.end_spin)
         range_inputs_layout.addStretch()
         card_layout.addWidget(range_inputs)
+        range_inputs.setVisible(self._show_range)
 
         self.manual_switch = SwitchButton()
         self.manual_switch.setChecked(False)
@@ -462,13 +534,13 @@ class RunPage(QWidget):
 
         self.keep_open_switch = SwitchButton()
         self.keep_open_switch.setChecked(False)
-        card_layout.addWidget(
-            self._make_option_row(
-                "Biarkan browser tetap terbuka",
-                "ON: browser tetap terbuka sampai kamu menutupnya.",
-                self.keep_open_switch,
-            )
+        keep_open_row = self._make_option_row(
+            "Biarkan browser tetap terbuka",
+            "ON: browser tetap terbuka sampai kamu menutupnya.",
+            self.keep_open_switch,
         )
+        card_layout.addWidget(keep_open_row)
+        keep_open_row.setVisible(self._show_keep_open)
 
         idle_row = QWidget()
         idle_layout = QHBoxLayout(idle_row)
@@ -532,14 +604,14 @@ class RunPage(QWidget):
     def _build_run_card(self):
         card = CardWidget()
         card_layout = QVBoxLayout(card)
-        card_layout.addWidget(SubtitleLabel("Run"))
+        card_layout.addWidget(SubtitleLabel(self._run_card_title))
 
         button_row = QWidget()
         button_layout = QHBoxLayout(button_row)
         button_layout.setContentsMargins(0, 0, 0, 0)
         button_layout.setSpacing(8)
 
-        self.run_button = PrimaryPushButton("Mulai")
+        self.run_button = PrimaryPushButton(self._run_label)
         self.run_button.clicked.connect(self._confirm_start)
         self.stop_button = PushButton("Stop")
         self.stop_button.clicked.connect(self._confirm_stop)
@@ -673,7 +745,7 @@ class RunPage(QWidget):
 
     def _load_settings(self):
         data = load_gui_settings()
-        options = data.get("options", {})
+        options = data.get(self._settings_key, {})
         excel_path = data.get("excel_path")
         recents = data.get("recent_excels", [])
 
@@ -690,27 +762,51 @@ class RunPage(QWidget):
             self.manual_switch.setChecked(bool(options["manual_only"]))
         if "headless" in options:
             self.headless_switch.setChecked(bool(options["headless"]))
-        if "keep_open" in options:
+        if self._show_keep_open and "keep_open" in options:
             self.keep_open_switch.setChecked(bool(options["keep_open"]))
-        if "dirgc_only" in options:
+        else:
+            self.keep_open_switch.setChecked(False)
+        if self._show_dirgc_only and "dirgc_only" in options:
             self.dirgc_only_switch.setChecked(bool(options["dirgc_only"]))
-        if "edit_nama_alamat" in options:
+        else:
+            self.dirgc_only_switch.setChecked(False)
+        if self._show_edit_nama_alamat and "edit_nama_alamat" in options:
             self.edit_nama_alamat_switch.setChecked(
                 bool(options["edit_nama_alamat"])
             )
-        if "prefer_web_coords" in options:
+        else:
+            self.edit_nama_alamat_switch.setChecked(False)
+        if self._show_prefer_web_coords and "prefer_web_coords" in options:
             self.prefer_web_coords_switch.setChecked(
                 bool(options["prefer_web_coords"])
             )
+        else:
+            self.prefer_web_coords_switch.setChecked(False)
+        if self._update_fields:
+            if "update_fields" in options and isinstance(
+                options.get("update_fields"), list
+            ):
+                fields = {
+                    item
+                    for item in options.get("update_fields", [])
+                    if isinstance(item, str)
+                }
+                for key, switch in self._update_fields.items():
+                    switch.setChecked(key in fields)
+            else:
+                for switch in self._update_fields.values():
+                    switch.setChecked(True)
         if "idle_timeout_s" in options:
             self.idle_spin.setValue(int(options["idle_timeout_s"]))
         if "web_timeout_s" in options:
             self.web_timeout_spin.setValue(int(options["web_timeout_s"]))
-        if "range_enabled" in options:
+        if self._show_range and "range_enabled" in options:
             self.range_switch.setChecked(bool(options["range_enabled"]))
-        if "start_row" in options:
+        else:
+            self.range_switch.setChecked(False)
+        if self._show_range and "start_row" in options:
             self.start_spin.setValue(int(options["start_row"]))
-        if "end_row" in options:
+        if self._show_range and "end_row" in options:
             self.end_spin.setValue(int(options["end_row"]))
 
         self._toggle_dirgc_only()
@@ -719,7 +815,7 @@ class RunPage(QWidget):
         data = load_gui_settings()
         data["excel_path"] = self.excel_input.text().strip()
         data["recent_excels"] = self._recent_excels
-        data["options"] = {
+        options = {
             "manual_only": self.manual_switch.isChecked(),
             "headless": self.headless_switch.isChecked(),
             "keep_open": self.keep_open_switch.isChecked(),
@@ -732,6 +828,14 @@ class RunPage(QWidget):
             "start_row": self.start_spin.value(),
             "end_row": self.end_spin.value(),
         }
+        if self._update_fields:
+            selected_fields = [
+                key
+                for key, switch in self._update_fields.items()
+                if switch.isChecked()
+            ]
+            options["update_fields"] = selected_fields
+        data[self._settings_key] = options
         save_gui_settings(data)
 
     def _toggle_range(self):
@@ -753,6 +857,8 @@ class RunPage(QWidget):
             self.prefer_web_coords_switch,
         ]:
             widget.setEnabled(enabled)
+        for switch in self._update_fields.values():
+            switch.setEnabled(enabled)
         if enabled:
             self._toggle_range()
         else:
@@ -819,6 +925,15 @@ class RunPage(QWidget):
             start_row = self.start_spin.value()
             end_row = self.end_spin.value()
 
+        update_fields = None
+        if self._update_fields:
+            selected = [
+                key
+                for key, switch in self._update_fields.items()
+                if switch.isChecked()
+            ]
+            update_fields = selected
+
         return RunConfig(
             headless=self.headless_switch.isChecked(),
             manual_only=self.manual_switch.isChecked(),
@@ -831,6 +946,8 @@ class RunPage(QWidget):
             dirgc_only=self.dirgc_only_switch.isChecked(),
             edit_nama_alamat=self.edit_nama_alamat_switch.isChecked(),
             prefer_excel_coords=not self.prefer_web_coords_switch.isChecked(),
+            update_mode=self._update_mode_default,
+            update_fields=update_fields,
             use_sso=use_sso,
             sso_username=sso_username,
             sso_password=sso_password,
@@ -895,8 +1012,8 @@ class RunPage(QWidget):
 
     def _confirm_start(self):
         if self._confirm_dialog(
-            "Mulai proses",
-            "Mulai proses sekarang?",
+            self._confirm_start_title,
+            self._confirm_start_message,
         ):
             self._start_run()
 
@@ -1025,6 +1142,8 @@ class RunPage(QWidget):
             self.end_spin,
         ]:
             widget.setEnabled(enabled)
+        for switch in self._update_fields.values():
+            switch.setEnabled(enabled)
 
         if enabled:
             self._toggle_dirgc_only()
@@ -1168,6 +1287,10 @@ class HomePage(QWidget):
             (
                 "Prioritaskan koordinat web",
                 "ON: koordinat web dipertahankan; OFF: koordinat dari Excel.",
+            ),
+            (
+                "Menu Update Data",
+                "Gunakan menu Update untuk klik Edit Hasil dan memperbarui data.",
             ),
             (
                 "Batas idle (detik)",
@@ -1374,15 +1497,29 @@ class MainWindow(FluentWindow):
         self.home_page = HomePage(self)
         self.sso_page = SsoPage(self)
         self.run_page = RunPage(self.sso_page, self)
+        self.update_page = RunPage(
+            self.sso_page,
+            self,
+            update_mode_default=True,
+            title_text="Update Data",
+            subtitle_text="Perbarui data di DIRGC berdasarkan Excel.",
+            run_label="Update",
+            run_card_title="Update",
+            confirm_title="Mulai update",
+            confirm_message="Mulai update sekarang?",
+            settings_key="options_update",
+        )
         self.settings_page = SettingsPage(self._app, self)
         self.home_page.setObjectName("home_page")
         self.run_page.setObjectName("run_page")
         self.sso_page.setObjectName("sso_page")
+        self.update_page.setObjectName("update_page")
         self.settings_page.setObjectName("settings_page")
 
         self.addSubInterface(self.home_page, FIF.HOME, "Beranda")
         self.addSubInterface(self.sso_page, FIF.PEOPLE, "Akun SSO")
         self.addSubInterface(self.run_page, FIF.PLAY, "Run")
+        self.addSubInterface(self.update_page, FIF.EDIT, "Update")
         self.addSubInterface(
             self.settings_page,
             FIF.SETTING,
@@ -1393,6 +1530,8 @@ class MainWindow(FluentWindow):
     def closeEvent(self, event):
         if self.run_page:
             self.run_page._save_settings()
+        if self.update_page:
+            self.update_page._save_settings()
         super().closeEvent(event)
 
 
