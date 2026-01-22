@@ -191,6 +191,7 @@ class RunConfig:
     keep_open: bool
     dirgc_only: bool
     edit_nama_alamat: bool
+    prefer_excel_coords: bool
     use_sso: bool
     sso_username: Optional[str]
     sso_password: Optional[str]
@@ -237,6 +238,7 @@ class RunWorker(QThread):
                 keep_open=self._config.keep_open,
                 dirgc_only=self._config.dirgc_only,
                 edit_nama_alamat=self._config.edit_nama_alamat,
+                prefer_excel_coords=self._config.prefer_excel_coords,
                 credentials=credentials,
                 stop_event=self._stop_event,
                 progress_callback=self._emit_progress,
@@ -391,6 +393,17 @@ class RunPage(QWidget):
                 "Edit Nama/Alamat Usaha dari Excel",
                 "ON: aktifkan toggle edit di popup dan isi dari data Excel.",
                 self.edit_nama_alamat_switch,
+            )
+        )
+
+        self.prefer_web_coords_switch = SwitchButton()
+        self.prefer_web_coords_switch.setChecked(False)
+        card_layout.addWidget(
+            self._make_option_row(
+                "Prioritaskan koordinat web",
+                "ON: jika koordinat web sudah terisi, tidak dioverwrite. "
+                "OFF: gunakan koordinat dari Excel.",
+                self.prefer_web_coords_switch,
             )
         )
 
@@ -685,6 +698,10 @@ class RunPage(QWidget):
             self.edit_nama_alamat_switch.setChecked(
                 bool(options["edit_nama_alamat"])
             )
+        if "prefer_web_coords" in options:
+            self.prefer_web_coords_switch.setChecked(
+                bool(options["prefer_web_coords"])
+            )
         if "idle_timeout_s" in options:
             self.idle_spin.setValue(int(options["idle_timeout_s"]))
         if "web_timeout_s" in options:
@@ -708,6 +725,7 @@ class RunPage(QWidget):
             "keep_open": self.keep_open_switch.isChecked(),
             "dirgc_only": self.dirgc_only_switch.isChecked(),
             "edit_nama_alamat": self.edit_nama_alamat_switch.isChecked(),
+            "prefer_web_coords": self.prefer_web_coords_switch.isChecked(),
             "idle_timeout_s": self.idle_spin.value(),
             "web_timeout_s": self.web_timeout_spin.value(),
             "range_enabled": self.range_switch.isChecked(),
@@ -732,6 +750,7 @@ class RunPage(QWidget):
             self.recent_combo,
             self.range_switch,
             self.edit_nama_alamat_switch,
+            self.prefer_web_coords_switch,
         ]:
             widget.setEnabled(enabled)
         if enabled:
@@ -811,6 +830,7 @@ class RunPage(QWidget):
             keep_open=self.keep_open_switch.isChecked(),
             dirgc_only=self.dirgc_only_switch.isChecked(),
             edit_nama_alamat=self.edit_nama_alamat_switch.isChecked(),
+            prefer_excel_coords=not self.prefer_web_coords_switch.isChecked(),
             use_sso=use_sso,
             sso_username=sso_username,
             sso_password=sso_password,
@@ -997,6 +1017,7 @@ class RunPage(QWidget):
             self.keep_open_switch,
             self.dirgc_only_switch,
             self.edit_nama_alamat_switch,
+            self.prefer_web_coords_switch,
             self.idle_spin,
             self.web_timeout_spin,
             self.range_switch,
@@ -1143,6 +1164,10 @@ class HomePage(QWidget):
             (
                 "Edit Nama/Alamat Usaha dari Excel",
                 "ON: aktifkan toggle edit di popup dan isi dari data Excel.",
+            ),
+            (
+                "Prioritaskan koordinat web",
+                "ON: koordinat web dipertahankan; OFF: koordinat dari Excel.",
             ),
             (
                 "Batas idle (detik)",

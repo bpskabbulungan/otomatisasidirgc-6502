@@ -19,6 +19,7 @@ def process_excel_rows(
     use_saved_credentials,
     credentials,
     edit_nama_alamat=False,
+    prefer_excel_coords=True,
     start_row=None,
     end_row=None,
     progress_callback=None,
@@ -277,12 +278,25 @@ def process_excel_rows(
                 except Exception:
                     current_value = ""
                 current_value = (current_value or "").strip()
+                desired_value = ""
+                if value is not None:
+                    desired_value = str(value).strip()
+
+                if prefer_excel_coords:
+                    if desired_value:
+                        if current_value != desired_value:
+                            monitor.bot_fill(selector, desired_value)
+                        return desired_value, "excel"
+                    if current_value:
+                        return current_value, "web"
+                    return "", "empty"
+
                 if current_value:
                     return current_value, "web"
-                if not value:
+                if not desired_value:
                     return "", "empty"
-                monitor.bot_fill(selector, value)
-                return str(value).strip(), "excel"
+                monitor.bot_fill(selector, desired_value)
+                return desired_value, "excel"
 
             latitude_value, latitude_source = safe_fill(
                 "#tt_latitude_cek_user", latitude, "latitude"

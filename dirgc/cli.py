@@ -92,6 +92,23 @@ def build_parser():
         action="store_true",
         help="Aktifkan toggle edit Nama/Alamat Usaha dan isi dari Excel.",
     )
+    coord_group = parser.add_mutually_exclusive_group()
+    coord_group.add_argument(
+        "--prefer-excel-coords",
+        action="store_true",
+        help=(
+            "Utamakan koordinat dari Excel (default). "
+            "Jika ada nilai Excel, overwrite nilai web."
+        ),
+    )
+    coord_group.add_argument(
+        "--prefer-web-coords",
+        action="store_true",
+        help=(
+            "Utamakan koordinat dari web. "
+            "Jika field web sudah terisi, tidak dioverwrite."
+        ),
+    )
     return parser
 
 
@@ -117,6 +134,7 @@ def run_dirgc(
     keep_open=False,
     dirgc_only=False,
     edit_nama_alamat=False,
+    prefer_excel_coords=True,
     credentials=None,
     stop_event=None,
     progress_callback=None,
@@ -228,6 +246,7 @@ def run_dirgc(
                 use_saved_credentials=not manual_only,
                 credentials=credentials_value,
                 edit_nama_alamat=edit_nama_alamat,
+                prefer_excel_coords=prefer_excel_coords,
                 start_row=start_row,
                 end_row=end_row,
                 progress_callback=progress_callback,
@@ -264,6 +283,7 @@ def main():
         keep_open=args.keep_open,
         dirgc_only=args.dirgc_only,
         edit_nama_alamat=args.edit_nama_alamat,
+        prefer_excel_coords=not args.prefer_web_coords,
     )
 
 

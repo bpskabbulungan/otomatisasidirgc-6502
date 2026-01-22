@@ -186,8 +186,10 @@ Perintah di atas hanya memproses baris 1 sampai 5 (1-based, inklusif).
 - `--dirgc-only` untuk berhenti di halaman DIRGC (tanpa filter/input).
 - `--edit-nama-alamat` untuk mengaktifkan toggle edit Nama/Alamat Usaha dan isi dari Excel.
 - `--keep-open` untuk menahan browser tetap terbuka setelah proses.
+- `--prefer-web-coords` untuk mempertahankan koordinat yang sudah terisi di web.
 
 Auto-login akan mencoba kredensial terlebih dulu; jika gagal/OTP muncul, akan beralih ke manual login.
+Secara default, koordinat diisi dari Excel (jika ada), meskipun web sudah berisi.
 
 ## Konfigurasi Akun SSO
 
