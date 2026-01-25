@@ -1,6 +1,7 @@
 import re
 import time
 
+from playwright.sync_api import TimeoutError as PWTimeoutError
 from .logging_utils import log_info, log_warn
 from .settings import (
     AUTO_LOGIN_RESULT_TIMEOUT_S,
@@ -40,7 +41,7 @@ class ActivityMonitor:
             return None
         return timeout_s * self.timeout_scale
 
-    def wait_for_condition(self, condition, timeout_s=None, poll_ms=500):
+    def wait_for_condition(self, condition, timeout_s=None, poll_ms=1500):
         timeout_s = self.scale_timeout(timeout_s)
         start = time.monotonic()
         while True:
@@ -72,7 +73,7 @@ class ActivityMonitor:
     def bot_goto(self, url):
         self._check_stop()
         self.mark_activity("bot")
-        self.page.goto(url, wait_until="domcontentloaded")
+        self.page.goto(url, wait_until="commit")
 
 
 def install_user_activity_tracking(page, mark_activity):
@@ -278,59 +279,6 @@ def ensure_filter_panel_open(page, monitor):
 def apply_filter(page, monitor, idsbr, nama_usaha, alamat):
     ensure_filter_panel_open(page, monitor)
 
-    def get_results_snapshot():
-        header_locator = page.locator(".usaha-card-header")
-        count = header_locator.count()
-        first_text = ""
-        last_text = ""
-        if count > 0:
-            try:
-                first_text = header_locator.first.inner_text().strip()
-            except Exception:
-                first_text = ""
-            if count > 1:
-                try:
-                    last_text = (
-                        header_locator.nth(count - 1)
-                        .inner_text()
-                        .strip()
-                    )
-                except Exception:
-                    last_text = ""
-            else:
-                last_text = first_text
-        return count, first_text, last_text
-
-    def results_changed(previous_snapshot):
-        return get_results_snapshot() != previous_snapshot
-
-    def wait_for_results(previous_snapshot, timeout_s=15):
-        monitor.wait_for_condition(
-            lambda: is_visible(page, ".empty-state")
-            or is_visible(page, ".no-data")
-            or is_visible(page, ".no-results")
-            or results_changed(previous_snapshot),
-            timeout_s=timeout_s,
-        )
-        wait_for_block_ui_clear(page, monitor, timeout_s=timeout_s)
-        return page.locator(".usaha-card-header").count()
-
-    def retry_results_if_slow(count, timeout_s=5):
-        if count <= 1:
-            return count
-        previous_snapshot = get_results_snapshot()
-        updated = monitor.wait_for_condition(
-            lambda: is_visible(page, ".empty-state")
-            or is_visible(page, ".no-data")
-            or is_visible(page, ".no-results")
-            or results_changed(previous_snapshot),
-            timeout_s=timeout_s,
-        )
-        if not updated:
-            return count
-        wait_for_block_ui_clear(page, monitor, timeout_s=timeout_s)
-        return page.locator(".usaha-card-header").count()
-
     def set_filter_values(idsbr_value, nama_value, alamat_value):
         monitor.mark_activity("bot")
         page.evaluate(
@@ -340,57 +288,71 @@ def apply_filter(page, monitor, idsbr, nama_usaha, alamat):
                 const input = document.querySelector(selector);
                 if (!input) return;
                 input.value = value || "";
-              };
-
-              setValue("#search-idsbr", idsbrValue);
-              setValue("#search-nama", namaValue);
-              setValue("#search-alamat", alamatValue);
-
-              const dispatch = (selector) => {
-                const input = document.querySelector(selector);
-                if (!input) return;
                 input.dispatchEvent(new Event("input", { bubbles: true }));
                 input.dispatchEvent(new Event("change", { bubbles: true }));
               };
-
-              dispatch("#search-idsbr");
-              dispatch("#search-nama");
-              dispatch("#search-alamat");
+              setValue("#search-idsbr", idsbrValue);
+              setValue("#search-nama", namaValue);
+              setValue("#search-alamat", alamatValue);
             }
             """,
-            {
-                "idsbrValue": idsbr_value or "",
-                "namaValue": nama_value or "",
-                "alamatValue": alamat_value or "",
-            },
+            {"idsbrValue": idsbr_value or "", "namaValue": nama_value or "", "alamatValue": alamat_value or ""},
         )
 
+    def wait_search_complete(timeout_s=20):
+        spinner = page.locator(BLOCK_UI_SELECTOR)
+        empty = page.locator(".empty-state, .no-data, .no-results")
+        cards = page.locator(".usaha-card-header")
+
+        # 1) Kalau spinner sempat muncul, tunggu dia hilang (hidden/detached)
+        try:
+            spinner.wait_for(state="visible", timeout=2000)
+            spinner.wait_for(state="hidden", timeout=int(timeout_s * 1000))
+        except PWTimeoutError:
+            # spinner tidak muncul atau animasi aneh; lanjutkan saja
+            pass
+
+        # 2) Setelah spinner hilang, tunggu salah satu bukti hasil (empty atau ada card)
+        # Karena .count() tidak wait, kita buat wait ringan yang deterministik:
+        try:
+            empty.first.wait_for(state="visible", timeout=1500)
+            return 0
+        except PWTimeoutError:
+            pass
+
+        # minimal: pastikan DOM hasil sudah ada, bukan polling text
+        # kalau tidak ada hasil, ini akan timeout cepat (1.5s)
+        try:
+            cards.first.wait_for(state="visible", timeout=1500)
+        except PWTimeoutError:
+            return 0  # fallback: anggap kosong kalau tidak ada bukti apa pun
+
+        return cards.count()
+
     def search_with(idsbr_value, nama_value, alamat_value):
-        previous_snapshot = get_results_snapshot()
-        set_filter_values(idsbr_value, nama_value, alamat_value)
-        monitor.wait_for_condition(lambda: False, timeout_s=0.5)
-        return wait_for_results(previous_snapshot)
+        def is_gc_card(resp):
+            return (
+                "matchapro.web.bps.go.id/direktori-usaha/data-gc-card" in resp.url
+                and resp.request.method == "POST"
+                and resp.status == 200
+            )
+
+        with page.expect_response(is_gc_card, timeout=20000):
+            set_filter_values(idsbr_value, nama_value, alamat_value)
+
+        # optional: kalau masih pakai overlay
+        wait_for_block_ui_clear(page, monitor, timeout_s=20)
+
+        if is_visible(page, ".empty-state") or is_visible(page, ".no-data") or is_visible(page, ".no-results"):
+            return 0
+        return page.locator(".usaha-card-header").count()
+
 
     if idsbr:
         count = search_with(idsbr, "", "")
-        if count > 1:
-            log_info(
-                "Results not unique; rechecking for slow loading.",
-                count=count,
-            )
-            count = retry_results_if_slow(count)
         if count == 1:
-            return count
+            return 1
         if nama_usaha or alamat:
-            if count == 0:
-                log_warn(
-                    "IDSBR not found; retry with idsbr + nama_usaha + alamat."
-                )
-            else:
-                log_warn(
-                    "Multiple results for IDSBR; retry with idsbr + nama_usaha + alamat.",
-                    count=count,
-                )
             return search_with(idsbr, nama_usaha, alamat)
         return count
 
