@@ -26,3 +26,11 @@ VALID_HASIL_GC_CODES = set(HASIL_GC_LABELS.keys())
 MAX_MATCH_LOGS = 3
 
 BLOCK_UI_SELECTOR = ".blockUI.blockOverlay"
+
+# Resource blocking for lighter pages (avoid blocking CSS/JS).
+ENABLE_RESOURCE_BLOCKING = True
+BLOCK_RESOURCE_TYPES = {"image", "media", "font"}
+BLOCK_RESOURCE_DOMAINS = {"fonts.googleapis.com", "fonts.gstatic.com"}
+
+# Write run log checkpoints periodically to reduce data loss on long runs.
+RUN_LOG_CHECKPOINT_EVERY = 50

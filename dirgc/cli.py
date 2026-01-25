@@ -1,6 +1,7 @@
 import argparse
 import os
 import sys
+from urllib.parse import urlparse
 
 from playwright.sync_api import sync_playwright
 
@@ -13,6 +14,9 @@ from .settings import (
     DEFAULT_EXCEL_FILE,
     DEFAULT_IDLE_TIMEOUT_MS,
     DEFAULT_WEB_TIMEOUT_S,
+    BLOCK_RESOURCE_DOMAINS,
+    BLOCK_RESOURCE_TYPES,
+    ENABLE_RESOURCE_BLOCKING,
 )
 
 
@@ -196,6 +200,18 @@ def run_dirgc(
             java_script_enabled=True,
             permissions=["geolocation"]
         )
+        if ENABLE_RESOURCE_BLOCKING and (BLOCK_RESOURCE_TYPES or BLOCK_RESOURCE_DOMAINS):
+            def _route_handler(route):
+                domain = urlparse(route.request.url).netloc.lower()
+                if domain in BLOCK_RESOURCE_DOMAINS:
+                    route.abort()
+                    return
+                if route.request.resource_type in BLOCK_RESOURCE_TYPES:
+                    route.abort()
+                else:
+                    route.continue_()
+
+            context.route("**/*", _route_handler)
         page = context.new_page()
         page.set_default_timeout(web_timeout_s * 1000)
         page.set_default_navigation_timeout(web_timeout_s * 1000)
