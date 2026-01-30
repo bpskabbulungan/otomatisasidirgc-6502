@@ -176,6 +176,75 @@ class RequestRateLimiter:
         self.reset_penalty()
 
 
+SERVER_COOLDOWN_UNTIL = 0.0
+SERVER_COOLDOWN_REASON = ""
+
+
+def set_server_cooldown(seconds, reason=""):
+    global SERVER_COOLDOWN_UNTIL, SERVER_COOLDOWN_REASON
+    try:
+        seconds = float(seconds)
+    except (TypeError, ValueError):
+        return False
+    if seconds <= 0:
+        return False
+    now = time.monotonic()
+    until = now + seconds
+    if until <= SERVER_COOLDOWN_UNTIL:
+        return False
+    SERVER_COOLDOWN_UNTIL = until
+    SERVER_COOLDOWN_REASON = reason or ""
+    log_warn(
+        "Server cooldown set.",
+        wait_s=round(seconds, 1),
+        reason=SERVER_COOLDOWN_REASON or "-",
+    )
+    return True
+
+
+def get_server_cooldown_remaining():
+    remaining = SERVER_COOLDOWN_UNTIL - time.monotonic()
+    if remaining <= 0:
+        return 0.0, ""
+    return remaining, SERVER_COOLDOWN_REASON
+
+
+def wait_with_keepalive(
+    monitor, total_s, step_s=30, log_interval_s=60, log_context=""
+):
+    try:
+        remaining = float(total_s)
+    except (TypeError, ValueError):
+        return
+    if remaining <= 0:
+        return
+    step_s = max(1.0, float(step_s))
+    log_interval_s = (
+        max(10.0, float(log_interval_s)) if log_interval_s else 0.0
+    )
+    next_log = time.monotonic()
+    while remaining > 0:
+        now = time.monotonic()
+        if log_interval_s and now >= next_log:
+            seconds_left = max(0, int(round(remaining)))
+            minutes = seconds_left // 60
+            seconds = seconds_left % 60
+            log_warn(
+                "Cooldown aktif; menunggu sebelum lanjut.",
+                sisa=f"{minutes:02d}:{seconds:02d}",
+                context=log_context or "-",
+            )
+            next_log = now + log_interval_s
+        monitor.mark_activity("cooldown")
+        chunk = min(step_s, remaining)
+        monitor.wait_for_condition(lambda: False, timeout_s=chunk)
+        remaining -= chunk
+    log_info(
+        "Cooldown selesai; melanjutkan proses.",
+        context=log_context or "-",
+    )
+
+
 FILTER_RATE_LIMITER = RequestRateLimiter()
 MAX_RATE_LIMIT_RETRIES = 5
 
@@ -510,6 +579,16 @@ def apply_filter(page, monitor, idsbr, nama_usaha, alamat):
 
         while True:
             attempts += 1
+            remaining, reason = get_server_cooldown_remaining()
+            if remaining > 0:
+                log_warn(
+                    "Server cooldown aktif; menunda filter.",
+                    wait_s=round(remaining, 1),
+                    reason=reason or "-",
+                )
+                wait_with_keepalive(
+                    monitor, remaining, log_context="filter"
+                )
             FILTER_RATE_LIMITER.wait_for_slot(monitor)
             previous_snapshot = get_results_snapshot()
 

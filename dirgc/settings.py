@@ -7,7 +7,7 @@ MATCHAPRO_HOST = "matchapro.web.bps.go.id"
 SSO_HOST = "sso.bps.go.id"
 AUTO_LOGIN_RESULT_TIMEOUT_S = 15
 DEFAULT_IDLE_TIMEOUT_MS = 300000
-DEFAULT_WEB_TIMEOUT_S = 30
+DEFAULT_WEB_TIMEOUT_S = 300
 DEFAULT_RATE_LIMIT_PROFILE = "safe"
 
 DEFAULT_CREDENTIALS_FILE = os.path.join("config", "credentials.json")

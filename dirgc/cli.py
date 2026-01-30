@@ -1,5 +1,7 @@
 import argparse
+import json
 import os
+import re
 import sys
 from urllib.parse import urlparse
 
@@ -10,6 +12,7 @@ from .browser import (
     apply_rate_limit_profile,
     ensure_on_dirgc,
     install_user_activity_tracking,
+    set_server_cooldown,
 )
 from .credentials import load_credentials
 from .logging_utils import log_info, log_warn
@@ -124,6 +127,14 @@ def build_parser():
             f"(default: {DEFAULT_RATE_LIMIT_PROFILE})."
         ),
     )
+    parser.add_argument(
+        "--stop-on-cooldown",
+        action="store_true",
+        help=(
+            "Hentikan proses jika server meminta jeda (HTTP 429) "
+            "dan simpan posisi terakhir untuk dilanjutkan."
+        ),
+    )
     coord_group = parser.add_mutually_exclusive_group()
     coord_group.add_argument(
         "--prefer-excel-coords",
@@ -174,6 +185,7 @@ def run_dirgc(
     progress_callback=None,
     wait_for_close=None,
     rate_limit_profile=DEFAULT_RATE_LIMIT_PROFILE,
+    stop_on_cooldown=False,
 ):
     ensure_playwright_browsers()
     apply_rate_limit_profile(rate_limit_profile)
@@ -299,6 +311,7 @@ def run_dirgc(
                 start_row=start_row,
                 end_row=end_row,
                 progress_callback=progress_callback,
+                stop_on_cooldown=stop_on_cooldown,
             )
 
         if keep_open:
@@ -309,6 +322,65 @@ def run_dirgc(
 
         context.close()
         browser.close()
+
+
+def _parse_int(value):
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_cooldown_from_message(message):
+    if not message:
+        return None
+    text = str(message).lower()
+    minute_match = re.search(r"tunggu\s+(\d+)\s*(menit|minute)", text)
+    if minute_match:
+        minutes = _parse_int(minute_match.group(1))
+        if minutes is not None:
+            return minutes * 60
+    second_match = re.search(r"tunggu\s+(\d+)\s*(detik|second)", text)
+    if second_match:
+        seconds = _parse_int(second_match.group(1))
+        if seconds is not None:
+            return seconds
+    return None
+
+
+def _extract_cooldown_seconds(body_text, headers):
+    seconds = 0
+    reason = ""
+
+    retry_after = None
+    if headers:
+        retry_after = headers.get("retry-after") or headers.get("Retry-After")
+    retry_seconds = _parse_int(retry_after)
+    if retry_seconds is not None:
+        seconds = max(seconds, retry_seconds)
+
+    body = (body_text or "").strip()
+    if body:
+        parsed = None
+        if body.startswith("{") or body.startswith("["):
+            try:
+                parsed = json.loads(body)
+            except json.JSONDecodeError:
+                parsed = None
+        if isinstance(parsed, dict):
+            message = parsed.get("message")
+            reason = message or reason
+            msg_seconds = _extract_cooldown_from_message(message)
+            if msg_seconds:
+                seconds = max(seconds, msg_seconds)
+            retry_after_body = _parse_int(parsed.get("retry_after"))
+            if retry_after_body is not None:
+                seconds = max(seconds, retry_after_body)
+        else:
+            msg_seconds = _extract_cooldown_from_message(body)
+            if msg_seconds:
+                seconds = max(seconds, msg_seconds)
+    return seconds, reason
 
 
 def install_429_response_logger(page, body_limit=800):
@@ -361,7 +433,8 @@ def install_429_response_logger(page, body_limit=800):
             except Exception as inner:
                 body_error = str(inner) or str(exc)
 
-        body_text = _truncate(body_text.strip(), body_limit) if body_text else ""
+        raw_body_text = body_text.strip() if body_text else ""
+        body_text = _truncate(raw_body_text, body_limit) if raw_body_text else ""
 
         log_warn(
             "HTTP 429 response captured.",
@@ -373,6 +446,12 @@ def install_429_response_logger(page, body_limit=800):
             body=body_text,
             body_error=body_error,
         )
+
+        cooldown_seconds, reason = _extract_cooldown_seconds(
+            raw_body_text, headers
+        )
+        if cooldown_seconds:
+            set_server_cooldown(cooldown_seconds, reason=reason)
 
     page.on("response", handle_response)
 
@@ -409,6 +488,7 @@ def main():
         update_mode=args.update_mode,
         update_fields=update_fields,
         rate_limit_profile=args.rate_limit_profile,
+        stop_on_cooldown=args.stop_on_cooldown,
     )
 
 

@@ -5,13 +5,16 @@ from .browser import (
     SUBMIT_RATE_LIMITER,
     apply_filter,
     ensure_on_dirgc,
+    get_server_cooldown_remaining,
     hasil_gc_select,
     is_visible,
+    wait_with_keepalive,
     wait_for_block_ui_clear,
 )
 from .excel import load_excel_rows
 from .logging_utils import log_error, log_info, log_warn
 from .matching import select_matching_card
+from .resume_state import save_resume_state
 from .run_logs import build_run_log_path, write_run_log
 from .settings import RUN_LOG_CHECKPOINT_EVERY, TARGET_URL
 
@@ -189,6 +192,7 @@ def process_excel_rows(
     start_row=None,
     end_row=None,
     progress_callback=None,
+    stop_on_cooldown=False,
 ):
     run_log_path = build_run_log_path()
     run_log_rows = []
@@ -284,6 +288,7 @@ def process_excel_rows(
 
     stop_reason = None
     idle_reason = None
+    cooldown_reason = None
     checkpoint_every = int(RUN_LOG_CHECKPOINT_EVERY or 0)
     last_checkpoint = 0
 
@@ -394,6 +399,42 @@ def process_excel_rows(
                 use_saved_credentials=use_saved_credentials,
                 credentials=credentials,
             )
+            remaining, reason = get_server_cooldown_remaining()
+            if remaining > 0:
+                resume_at = time.strftime(
+                    "%H:%M:%S", time.localtime(time.time() + remaining)
+                )
+                if stop_on_cooldown:
+                    log_warn(
+                        "Cooldown aktif; menghentikan proses.",
+                        wait_s=round(remaining, 1),
+                        resume_at=resume_at,
+                        reason=reason or "-",
+                        context="pre-filter",
+                    )
+                    save_resume_state(
+                        excel_file=excel_file,
+                        next_row=excel_row,
+                        reason=reason,
+                        run_log_path=run_log_path,
+                    )
+                    status = "stopped"
+                    note = (
+                        f"Cooldown aktif; lanjutkan dari baris {excel_row}."
+                    )
+                    cooldown_reason = "Cooldown active; stopped for resume."
+                    stop_processing = True
+                    continue
+                log_warn(
+                    "Server meminta jeda sebelum lanjut.",
+                    wait_s=round(remaining, 1),
+                    resume_at=resume_at,
+                    reason=reason or "-",
+                    context="pre-filter",
+                )
+                wait_with_keepalive(
+                    monitor, remaining, log_context="pre-filter"
+                )
             if update_mode:
                 missing_fields = []
                 lat_text = (latitude or "").strip()
@@ -784,6 +825,42 @@ def process_excel_rows(
                 monitor.bot_goto(TARGET_URL)
                 continue
 
+            remaining, reason = get_server_cooldown_remaining()
+            if remaining > 0:
+                resume_at = time.strftime(
+                    "%H:%M:%S", time.localtime(time.time() + remaining)
+                )
+                if stop_on_cooldown:
+                    log_warn(
+                        "Cooldown aktif; menghentikan proses.",
+                        wait_s=round(remaining, 1),
+                        resume_at=resume_at,
+                        reason=reason or "-",
+                        context="pre-submit",
+                    )
+                    save_resume_state(
+                        excel_file=excel_file,
+                        next_row=excel_row,
+                        reason=reason,
+                        run_log_path=run_log_path,
+                    )
+                    status = "stopped"
+                    note = (
+                        f"Cooldown aktif; lanjutkan dari baris {excel_row}."
+                    )
+                    cooldown_reason = "Cooldown active; stopped for resume."
+                    stop_processing = True
+                    continue
+                log_warn(
+                    "Server meminta jeda sebelum submit.",
+                    wait_s=round(remaining, 1),
+                    resume_at=resume_at,
+                    reason=reason or "-",
+                    context="pre-submit",
+                )
+                wait_with_keepalive(
+                    monitor, remaining, log_context="pre-submit"
+                )
             SUBMIT_RATE_LIMITER.wait_for_slot(monitor)
             wait_for_block_ui_clear(page, monitor, timeout_s=15)
             try:
@@ -1086,6 +1163,13 @@ def process_excel_rows(
     elif idle_reason:
         log_warn(
             "Processing stopped due to idle timeout.",
+            _spacer=True,
+            _divider=True,
+            **stats,
+        )
+    elif cooldown_reason:
+        log_warn(
+            "Processing stopped due to server cooldown.",
             _spacer=True,
             _divider=True,
             **stats,

@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sys
 import threading
 from dataclasses import dataclass
@@ -51,6 +52,7 @@ from qfluentwidgets import (
 
 from dirgc.cli import run_dirgc, validate_row_range
 from dirgc.logging_utils import set_log_handler
+from dirgc.resume_state import load_resume_state
 from dirgc.settings import (
     DEFAULT_EXCEL_FILE,
     DEFAULT_IDLE_TIMEOUT_MS,
@@ -69,6 +71,12 @@ FONT_BASE_PX_PROPERTY = "font_base_px"
 FONT_BASE_PT_PROPERTY = "font_base_pt"
 MUTED_TEXT_COLOR = "#4A4A4A"
 RATE_LIMIT_SETTINGS_KEY = "rate_limit"
+MIN_FONT_SIZE_PT = 10.0
+ADVANCED_SETTINGS_KEY = "advanced"
+IDLE_TIMEOUT_MIN_S = 30
+IDLE_TIMEOUT_MAX_S = 3600 * 6
+WEB_TIMEOUT_MIN_S = 10
+WEB_TIMEOUT_MAX_S = 600
 
 
 def load_gui_settings():
@@ -159,26 +167,113 @@ def save_rate_limit_profile(value):
     save_gui_settings(data)
 
 
+def _normalize_int_setting(value, default, minimum, maximum):
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return default
+    if value < minimum:
+        return minimum
+    if value > maximum:
+        return maximum
+    return value
+
+
+def _load_legacy_timeout(data, key):
+    for options_key in ("options", "options_update"):
+        options = data.get(options_key)
+        if isinstance(options, dict) and key in options:
+            return options.get(key)
+    return None
+
+
+def load_idle_timeout_s():
+    data = load_gui_settings()
+    advanced = data.get(ADVANCED_SETTINGS_KEY, {})
+    value = None
+    if isinstance(advanced, dict):
+        value = advanced.get("idle_timeout_s")
+    if value is None:
+        value = _load_legacy_timeout(data, "idle_timeout_s")
+    return _normalize_int_setting(
+        value,
+        DEFAULT_IDLE_TIMEOUT_MS // 1000,
+        IDLE_TIMEOUT_MIN_S,
+        IDLE_TIMEOUT_MAX_S,
+    )
+
+
+def load_web_timeout_s():
+    data = load_gui_settings()
+    advanced = data.get(ADVANCED_SETTINGS_KEY, {})
+    value = None
+    if isinstance(advanced, dict):
+        value = advanced.get("web_timeout_s")
+    if value is None:
+        value = _load_legacy_timeout(data, "web_timeout_s")
+    return _normalize_int_setting(
+        value,
+        DEFAULT_WEB_TIMEOUT_S,
+        WEB_TIMEOUT_MIN_S,
+        WEB_TIMEOUT_MAX_S,
+    )
+
+
+def save_advanced_timeouts(idle_timeout_s, web_timeout_s):
+    data = load_gui_settings()
+    advanced = data.get(ADVANCED_SETTINGS_KEY)
+    if not isinstance(advanced, dict):
+        advanced = {}
+        data[ADVANCED_SETTINGS_KEY] = advanced
+    advanced["idle_timeout_s"] = _normalize_int_setting(
+        idle_timeout_s,
+        DEFAULT_IDLE_TIMEOUT_MS // 1000,
+        IDLE_TIMEOUT_MIN_S,
+        IDLE_TIMEOUT_MAX_S,
+    )
+    advanced["web_timeout_s"] = _normalize_int_setting(
+        web_timeout_s,
+        DEFAULT_WEB_TIMEOUT_S,
+        WEB_TIMEOUT_MIN_S,
+        WEB_TIMEOUT_MAX_S,
+    )
+    save_gui_settings(data)
+
+
+def _font_point_size_for_widget(widget, font):
+    point_size = font.pointSizeF()
+    if point_size > 0:
+        return point_size
+    pixel_size = font.pixelSize()
+    if pixel_size <= 0:
+        return None
+    dpi = widget.logicalDpiY() if hasattr(widget, "logicalDpiY") else 96
+    if dpi <= 0:
+        dpi = 96
+    return pixel_size * 72.0 / dpi
+
+
 def _apply_font_scale_to_widget(widget, font_scale):
-    base_px = widget.property(FONT_BASE_PX_PROPERTY)
     base_pt = widget.property(FONT_BASE_PT_PROPERTY)
+    base_px = widget.property(FONT_BASE_PX_PROPERTY)
     scale_factor = font_scale / 100.0
-    if base_px is None and base_pt is None:
-        font = widget.font()
-        if font.pixelSize() > 0:
-            base_px = int(round(font.pixelSize() / scale_factor))
-            widget.setProperty(FONT_BASE_PX_PROPERTY, base_px)
-        elif font.pointSize() > 0:
-            base_pt = int(round(font.pointSize() / scale_factor))
+    if base_pt is None:
+        if base_px is not None:
+            dpi = widget.logicalDpiY() if hasattr(widget, "logicalDpiY") else 96
+            if dpi <= 0:
+                dpi = 96
+            base_pt = float(base_px) * 72.0 / dpi
             widget.setProperty(FONT_BASE_PT_PROPERTY, base_pt)
         else:
-            return
+            font = widget.font()
+            base_pt = _font_point_size_for_widget(widget, font)
+            if base_pt is None:
+                return
+            widget.setProperty(FONT_BASE_PT_PROPERTY, base_pt)
 
     font = widget.font()
-    if base_px is not None:
-        font.setPixelSize(max(8, int(round(base_px * scale_factor))))
-    elif base_pt is not None:
-        font.setPointSize(max(6, int(round(base_pt * scale_factor))))
+    target_pt = max(MIN_FONT_SIZE_PT, base_pt * scale_factor)
+    font.setPointSizeF(target_pt)
     widget.setFont(font)
 
 
@@ -187,12 +282,9 @@ def apply_font_scale(app, font_scale):
     for widget in QApplication.allWidgets():
         _apply_font_scale_to_widget(widget, font_scale)
 
-    base_size = max(8, int(round(BASE_FONT_SIZE * (font_scale / 100.0))))
+    base_size = max(MIN_FONT_SIZE_PT, BASE_FONT_SIZE * (font_scale / 100.0))
     font = app.font()
-    if font.pixelSize() > 0:
-        font.setPixelSize(base_size)
-    else:
-        font.setPointSize(base_size)
+    font.setPointSizeF(base_size)
     app.setFont(font)
 
 
@@ -228,6 +320,7 @@ class RunConfig:
     sso_password: Optional[str]
     web_timeout_s: int
     rate_limit_profile: str
+    stop_on_cooldown: bool
 
 
 class RunWorker(QThread):
@@ -275,6 +368,7 @@ class RunWorker(QThread):
                 update_fields=self._config.update_fields,
                 credentials=credentials,
                 rate_limit_profile=self._config.rate_limit_profile,
+                stop_on_cooldown=self._config.stop_on_cooldown,
                 stop_event=self._stop_event,
                 progress_callback=self._emit_progress,
                 wait_for_close=self._wait_for_close
@@ -327,6 +421,7 @@ class RunPage(QWidget):
         self._run_card_title = run_card_title
         self._settings_key = settings_key
         self._update_fields = {}
+        self._cooldown_active = False
         self._show_dirgc_only = not self._update_mode_default
         self._show_edit_nama_alamat = not self._update_mode_default
         self._show_prefer_web_coords = not self._update_mode_default
@@ -369,7 +464,6 @@ class RunPage(QWidget):
 
         layout.addWidget(content, stretch=1)
         layout.addWidget(build_footer_label())
-        self._connect_sso()
         self._is_stacked = False
         self._update_layout_mode(self.width())
         self._load_settings()
@@ -419,8 +513,12 @@ class RunPage(QWidget):
             self._on_recent_selected
         )
 
+        self.resume_button = PushButton("Lanjutkan dari resume_state")
+        self.resume_button.clicked.connect(self._apply_resume_state)
+
         form.addRow(BodyLabel("Excel file"), excel_row)
         form.addRow(BodyLabel("Recent"), self.recent_combo)
+        form.addRow(BodyLabel("Resume"), self.resume_button)
 
         card_layout.addLayout(form)
 
@@ -543,19 +641,36 @@ class RunPage(QWidget):
         card_layout.addWidget(range_inputs)
         range_inputs.setVisible(self._show_range)
 
-        self.manual_switch = SwitchButton()
-        self.manual_switch.setChecked(False)
+        self.advanced_switch = SwitchButton()
+        self.advanced_switch.setChecked(False)
+        self.advanced_switch.checkedChanged.connect(self._toggle_advanced)
         card_layout.addWidget(
             self._make_option_row(
-                "Login manual (tanpa auto-login)",
-                "ON: isi OTP langsung di browser. OFF: gunakan Akun SSO.",
-                self.manual_switch,
+                "Opsi lanjutan",
+                "Tampilkan opsi teknis seperti headless, cooldown, dan "
+                "keep open.",
+                self.advanced_switch,
             )
         )
 
+        self.advanced_container = QWidget()
+        advanced_layout = QVBoxLayout(self.advanced_container)
+        advanced_layout.setContentsMargins(0, 0, 0, 0)
+        advanced_layout.setSpacing(8)
+
+        self.stop_on_cooldown_switch = SwitchButton()
+        self.stop_on_cooldown_switch.setChecked(False)
+        cooldown_row = self._make_option_row(
+            "Stop saat cooldown (simpan posisi)",
+            "ON: jika server meminta jeda, proses dihentikan dan baris "
+            "terakhir disimpan untuk dilanjutkan.",
+            self.stop_on_cooldown_switch,
+        )
+        advanced_layout.addWidget(cooldown_row)
+
         self.headless_switch = SwitchButton()
         self.headless_switch.setChecked(False)
-        card_layout.addWidget(
+        advanced_layout.addWidget(
             self._make_option_row(
                 "Browser tanpa tampilan (headless)",
                 "ON: browser tidak terlihat. Tidak disarankan untuk SSO/OTP.",
@@ -570,63 +685,11 @@ class RunPage(QWidget):
             "ON: browser tetap terbuka sampai kamu menutupnya.",
             self.keep_open_switch,
         )
-        card_layout.addWidget(keep_open_row)
+        advanced_layout.addWidget(keep_open_row)
         keep_open_row.setVisible(self._show_keep_open)
 
-        idle_row = QWidget()
-        idle_layout = QHBoxLayout(idle_row)
-        idle_layout.setContentsMargins(0, 0, 0, 0)
-        idle_layout.setSpacing(12)
-
-        idle_label = StrongBodyLabel("Batas idle (detik)")
-        idle_hint = CaptionLabel(
-            "Jika tidak ada aktivitas, proses dihentikan otomatis."
-        )
-        idle_hint.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
-        idle_hint.setWordWrap(True)
-        self.idle_spin = QSpinBox()
-        self.idle_spin.setRange(30, 3600 * 6)
-        self.idle_spin.setValue(DEFAULT_IDLE_TIMEOUT_MS // 1000)
-        self.idle_spin.setSuffix(" s")
-        idle_text = QWidget()
-        idle_text_layout = QVBoxLayout(idle_text)
-        idle_text_layout.setContentsMargins(0, 0, 0, 0)
-        idle_text_layout.setSpacing(4)
-        idle_text_layout.addWidget(idle_label)
-        idle_text_layout.addWidget(idle_hint)
-        idle_layout.addWidget(idle_text, stretch=1)
-        idle_layout.addStretch()
-        idle_layout.addWidget(self.idle_spin)
-        card_layout.addWidget(idle_row)
-
-        web_row = QWidget()
-        web_layout = QHBoxLayout(web_row)
-        web_layout.setContentsMargins(0, 0, 0, 0)
-        web_layout.setSpacing(12)
-
-        web_label = StrongBodyLabel("Timeout loading web (detik)")
-        web_hint = CaptionLabel(
-            "Naikkan jika koneksi lambat atau halaman sering timeout."
-        )
-        web_hint.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
-        web_hint.setWordWrap(True)
-
-        web_text = QWidget()
-        web_text_layout = QVBoxLayout(web_text)
-        web_text_layout.setContentsMargins(0, 0, 0, 0)
-        web_text_layout.setSpacing(4)
-        web_text_layout.addWidget(web_label)
-        web_text_layout.addWidget(web_hint)
-
-        self.web_timeout_spin = QSpinBox()
-        self.web_timeout_spin.setRange(10, 600)
-        self.web_timeout_spin.setValue(DEFAULT_WEB_TIMEOUT_S)
-        self.web_timeout_spin.setSuffix(" s")
-
-        web_layout.addWidget(web_text, stretch=1)
-        web_layout.addStretch()
-        web_layout.addWidget(self.web_timeout_spin)
-        card_layout.addWidget(web_row)
+        card_layout.addWidget(self.advanced_container)
+        self._toggle_advanced()
 
         self._toggle_dirgc_only()
 
@@ -654,12 +717,15 @@ class RunPage(QWidget):
         self.status_label = BodyLabel("Status: idle")
         self.progress_label = CaptionLabel("Progress: -")
         self.progress_label.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
+        self.cooldown_label = CaptionLabel("Cooldown: -")
+        self.cooldown_label.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         self.progress_bar.setTextVisible(False)
         card_layout.addWidget(self.status_label)
         card_layout.addWidget(self.progress_label)
+        card_layout.addWidget(self.cooldown_label)
         card_layout.addWidget(self.progress_bar)
         card_layout.addWidget(button_row)
 
@@ -753,6 +819,138 @@ class RunPage(QWidget):
             self._push_recent_excel(path)
             self._save_settings()
 
+    def _normalize_path(self, path):
+        if not path:
+            return ""
+        try:
+            return os.path.abspath(path)
+        except OSError:
+            return path
+
+    def _apply_resume_state(self):
+        state = load_resume_state()
+        next_row = state.get("next_row")
+        excel_file = state.get("excel_file") or ""
+        saved_at = state.get("saved_at") or ""
+
+        if not next_row:
+            InfoBar.warning(
+                title="Resume tidak tersedia",
+                content="Resume state belum ditemukan.",
+                duration=4000,
+                parent=self,
+                position=InfoBarPosition.TOP_RIGHT,
+            )
+            return
+
+        if self.dirgc_only_switch.isChecked():
+            self.dirgc_only_switch.setChecked(False)
+
+        if excel_file:
+            if not os.path.exists(excel_file):
+                InfoBar.error(
+                    title="Resume gagal",
+                    content="File Excel dari resume_state tidak ditemukan.",
+                    duration=5000,
+                    parent=self,
+                    position=InfoBarPosition.TOP_RIGHT,
+                )
+            else:
+                self._set_excel_path(
+                    excel_file, push_recent=False, save=False
+                )
+
+        self.range_switch.setChecked(True)
+        try:
+            next_row = int(next_row)
+        except (TypeError, ValueError):
+            next_row = None
+        if next_row and next_row > 0:
+            self.start_spin.setValue(next_row)
+            if self.end_spin.value() < next_row:
+                self.end_spin.setValue(next_row)
+        self._toggle_range()
+
+        content = (
+            f"Mulai dari baris {next_row}."
+            if next_row
+            else "Resume diterapkan."
+        )
+        if saved_at:
+            content = f"{content} (tersimpan {saved_at})"
+        InfoBar.success(
+            title="Resume diterapkan",
+            content=content,
+            duration=4000,
+            parent=self,
+            position=InfoBarPosition.TOP_RIGHT,
+        )
+
+    def _auto_apply_resume_state(self, config: RunConfig):
+        if config.dirgc_only:
+            return config
+        state = load_resume_state()
+        next_row = state.get("next_row")
+        if not next_row:
+            return config
+        if config.start_row is not None:
+            return config
+
+        excel_file = config.excel_file or ""
+        state_file = state.get("excel_file") or ""
+
+        if excel_file and state_file:
+            if self._normalize_path(excel_file) != self._normalize_path(
+                state_file
+            ):
+                InfoBar.warning(
+                    title="Auto-resume diabaikan",
+                    content=(
+                        "Resume state berasal dari file Excel berbeda."
+                    ),
+                    duration=4000,
+                    parent=self,
+                    position=InfoBarPosition.TOP_RIGHT,
+                )
+                return config
+        elif not excel_file:
+            if state_file:
+                if not os.path.exists(state_file):
+                    InfoBar.warning(
+                        title="Auto-resume diabaikan",
+                        content="File Excel dari resume_state tidak ditemukan.",
+                        duration=4000,
+                        parent=self,
+                        position=InfoBarPosition.TOP_RIGHT,
+                    )
+                    return config
+                config.excel_file = state_file
+                self._set_excel_path(
+                    state_file, push_recent=False, save=False
+                )
+            else:
+                return config
+
+        try:
+            next_row = int(next_row)
+        except (TypeError, ValueError):
+            return config
+        if next_row <= 0:
+            return config
+
+        config.start_row = next_row
+        if config.end_row is not None and config.end_row < next_row:
+            config.end_row = next_row
+
+        InfoBar.success(
+            title="Auto-resume",
+            content=f"Mulai dari baris {next_row}.",
+            duration=4000,
+            parent=self,
+            position=InfoBarPosition.TOP_RIGHT,
+        )
+        return config
+
     def _push_recent_excel(self, path):
         normalized = os.path.normpath(path)
         if not normalized:
@@ -789,8 +987,6 @@ class RunPage(QWidget):
         if isinstance(excel_path, str) and excel_path:
             self._set_excel_path(excel_path, push_recent=False, save=False)
 
-        if "manual_only" in options:
-            self.manual_switch.setChecked(bool(options["manual_only"]))
         if "headless" in options:
             self.headless_switch.setChecked(bool(options["headless"]))
         if self._show_keep_open and "keep_open" in options:
@@ -813,6 +1009,21 @@ class RunPage(QWidget):
             )
         else:
             self.prefer_web_coords_switch.setChecked(False)
+        if "stop_on_cooldown" in options:
+            self.stop_on_cooldown_switch.setChecked(
+                bool(options["stop_on_cooldown"])
+            )
+        else:
+            self.stop_on_cooldown_switch.setChecked(False)
+        if hasattr(self, "advanced_switch"):
+            advanced_active = any(
+                [
+                    self.headless_switch.isChecked(),
+                    self.keep_open_switch.isChecked(),
+                    self.stop_on_cooldown_switch.isChecked(),
+                ]
+            )
+            self.advanced_switch.setChecked(advanced_active)
         if self._update_fields:
             if "update_fields" in options and isinstance(
                 options.get("update_fields"), list
@@ -827,10 +1038,6 @@ class RunPage(QWidget):
             else:
                 for switch in self._update_fields.values():
                     switch.setChecked(True)
-        if "idle_timeout_s" in options:
-            self.idle_spin.setValue(int(options["idle_timeout_s"]))
-        if "web_timeout_s" in options:
-            self.web_timeout_spin.setValue(int(options["web_timeout_s"]))
         if self._show_range and "range_enabled" in options:
             self.range_switch.setChecked(bool(options["range_enabled"]))
         else:
@@ -847,14 +1054,12 @@ class RunPage(QWidget):
         data["excel_path"] = self.excel_input.text().strip()
         data["recent_excels"] = self._recent_excels
         options = {
-            "manual_only": self.manual_switch.isChecked(),
             "headless": self.headless_switch.isChecked(),
             "keep_open": self.keep_open_switch.isChecked(),
             "dirgc_only": self.dirgc_only_switch.isChecked(),
             "edit_nama_alamat": self.edit_nama_alamat_switch.isChecked(),
             "prefer_web_coords": self.prefer_web_coords_switch.isChecked(),
-            "idle_timeout_s": self.idle_spin.value(),
-            "web_timeout_s": self.web_timeout_spin.value(),
+            "stop_on_cooldown": self.stop_on_cooldown_switch.isChecked(),
             "range_enabled": self.range_switch.isChecked(),
             "start_row": self.start_spin.value(),
             "end_row": self.end_spin.value(),
@@ -883,9 +1088,11 @@ class RunPage(QWidget):
             self.excel_input,
             self.excel_browse,
             self.recent_combo,
+            self.resume_button,
             self.range_switch,
             self.edit_nama_alamat_switch,
             self.prefer_web_coords_switch,
+            self.stop_on_cooldown_switch,
         ]:
             widget.setEnabled(enabled)
         for switch in self._update_fields.values():
@@ -895,6 +1102,12 @@ class RunPage(QWidget):
         else:
             self.start_spin.setEnabled(False)
             self.end_spin.setEnabled(False)
+
+    def _toggle_advanced(self):
+        if hasattr(self, "advanced_container"):
+            self.advanced_container.setVisible(
+                self.advanced_switch.isChecked()
+            )
 
 
     def _clear_log(self):
@@ -928,22 +1141,84 @@ class RunPage(QWidget):
         self.log_output.verticalScrollBar().setValue(
             self.log_output.verticalScrollBar().maximum()
         )
+        self._handle_cooldown_notifications(line)
 
-    def _connect_sso(self):
-        if not self._sso_page:
-            return
-        self._sso_page.use_switch.checkedChanged.connect(
-            self._sync_sso_state
-        )
-        self._sync_sso_state()
+    def _extract_log_field(self, line, key):
+        if not line or not key:
+            return ""
+        pattern = rf"(?:^|\|\s){re.escape(key)}=([^|]+)"
+        match = re.search(pattern, line)
+        if not match:
+            return ""
+        value = match.group(1).strip()
+        if value.startswith('"') and value.endswith('"'):
+            value = value[1:-1]
+        return value.strip()
 
-    def _sync_sso_state(self):
-        if not self._sso_page:
+    def _handle_cooldown_notifications(self, line):
+        if not line:
             return
-        sso_enabled = self._sso_page.is_enabled()
-        if sso_enabled:
-            self.manual_switch.setChecked(False)
-        self.manual_switch.setEnabled(not sso_enabled)
+        if "Cooldown aktif; menunggu sebelum lanjut." in line:
+            sisa = self._extract_log_field(line, "sisa")
+            if sisa:
+                self.cooldown_label.setText(f"Cooldown: {sisa}")
+            self._cooldown_active = True
+            return
+        if "Cooldown aktif; menghentikan proses." in line:
+            resume_at = self._extract_log_field(line, "resume_at")
+            content = (
+                "Server meminta jeda; proses dihentikan."
+                if not resume_at
+                else f"Server meminta jeda; proses dihentikan. Resume: {resume_at}"
+            )
+            self.cooldown_label.setText("Cooldown: -")
+            InfoBar.warning(
+                title="Cooldown aktif",
+                content=content,
+                duration=6000,
+                parent=self,
+                position=InfoBarPosition.TOP_RIGHT,
+            )
+            self._cooldown_active = False
+            return
+
+        if "Server meminta jeda sebelum " in line:
+            if self._cooldown_active:
+                return
+            self._cooldown_active = True
+            resume_at = self._extract_log_field(line, "resume_at")
+            wait_s = self._extract_log_field(line, "wait_s")
+            reason = self._extract_log_field(line, "reason")
+            details = []
+            if wait_s:
+                details.append(f"Jeda {wait_s} detik")
+                self.cooldown_label.setText(f"Cooldown: {wait_s}s")
+            if resume_at:
+                details.append(f"Lanjut {resume_at}")
+            if reason and reason != "-":
+                details.append(reason)
+            content = " | ".join(details) if details else "Menunggu sesuai instruksi server."
+            InfoBar.warning(
+                title="Auto-pause aktif",
+                content=content,
+                duration=5000,
+                parent=self,
+                position=InfoBarPosition.TOP_RIGHT,
+            )
+            return
+
+        if "Cooldown selesai; melanjutkan proses." in line:
+            if not self._cooldown_active:
+                return
+            self._cooldown_active = False
+            self.cooldown_label.setText("Cooldown: -")
+            InfoBar.success(
+                title="Auto-resume",
+                content="Cooldown selesai. Proses dilanjutkan otomatis.",
+                duration=3000,
+                parent=self,
+                position=InfoBarPosition.TOP_RIGHT,
+            )
 
     def _build_config(self):
         excel_text = self.excel_input.text().strip()
@@ -965,14 +1240,17 @@ class RunPage(QWidget):
             ]
             update_fields = selected
 
+        idle_timeout_s = load_idle_timeout_s()
+        web_timeout_s = load_web_timeout_s()
+
         return RunConfig(
             headless=self.headless_switch.isChecked(),
-            manual_only=self.manual_switch.isChecked(),
+            manual_only=not use_sso,
             excel_file=excel_file,
             start_row=start_row,
             end_row=end_row,
-            idle_timeout_ms=self.idle_spin.value() * 1000,
-            web_timeout_s=self.web_timeout_spin.value(),
+            idle_timeout_ms=idle_timeout_s * 1000,
+            web_timeout_s=web_timeout_s,
             keep_open=self.keep_open_switch.isChecked(),
             dirgc_only=self.dirgc_only_switch.isChecked(),
             edit_nama_alamat=self.edit_nama_alamat_switch.isChecked(),
@@ -983,6 +1261,7 @@ class RunPage(QWidget):
             sso_username=sso_username,
             sso_password=sso_password,
             rate_limit_profile=load_rate_limit_profile(),
+            stop_on_cooldown=self.stop_on_cooldown_switch.isChecked(),
         )
 
     def _validate_inputs(self, config: RunConfig):
@@ -1024,6 +1303,7 @@ class RunPage(QWidget):
             return
 
         config = self._build_config()
+        config = self._auto_apply_resume_state(config)
         if not self._validate_inputs(config):
             return
 
@@ -1031,6 +1311,7 @@ class RunPage(QWidget):
         self.status_label.setText("Status: running")
         self._set_running_state(True)
         self.progress_label.setText("Progress: memuat data...")
+        self.cooldown_label.setText("Cooldown: -")
         self._set_progress_loading()
         self._append_log("=== START RUN ===")
 
@@ -1070,6 +1351,8 @@ class RunPage(QWidget):
         self._set_running_state(False)
         self.progress_label.setText("Progress: -")
         self._reset_progress()
+        self.cooldown_label.setText("Cooldown: -")
+        self._cooldown_active = False
         InfoBar.success(
             title="Run selesai",
             content="Proses selesai tanpa error.",
@@ -1087,6 +1370,8 @@ class RunPage(QWidget):
         self._set_running_state(False)
         self.progress_label.setText("Progress: -")
         self._reset_progress()
+        self.cooldown_label.setText("Cooldown: -")
+        self._cooldown_active = False
         InfoBar.error(
             title="Run gagal",
             content=message,
@@ -1101,6 +1386,8 @@ class RunPage(QWidget):
         self._set_running_state(False)
         self.progress_label.setText("Progress: -")
         self._reset_progress()
+        self.cooldown_label.setText("Cooldown: -")
+        self._cooldown_active = False
         InfoBar.warning(
             title="Run dihentikan",
             content="Proses dihentikan oleh pengguna.",
@@ -1161,14 +1448,14 @@ class RunPage(QWidget):
             self.excel_input,
             self.excel_browse,
             self.recent_combo,
-            self.manual_switch,
+            self.resume_button,
+            self.advanced_switch,
             self.headless_switch,
             self.keep_open_switch,
+            self.stop_on_cooldown_switch,
             self.dirgc_only_switch,
             self.edit_nama_alamat_switch,
             self.prefer_web_coords_switch,
-            self.idle_spin,
-            self.web_timeout_spin,
             self.range_switch,
             self.start_spin,
             self.end_spin,
@@ -1179,7 +1466,6 @@ class RunPage(QWidget):
 
         if enabled:
             self._toggle_dirgc_only()
-            self._sync_sso_state()
         else:
             self.start_spin.setEnabled(False)
             self.end_spin.setEnabled(False)
@@ -1315,16 +1601,17 @@ class HomePage(QWidget):
 
         notes = [
             (
-                "Login manual (tanpa auto-login)",
-                "ON: login dilakukan manual di browser. OFF: gunakan Akun SSO.",
-            ),
-            (
-                "Browser tanpa tampilan (headless)",
+                "Browser tanpa tampilan (headless) - Opsi lanjutan",
                 "ON: browser tidak terlihat. Tidak disarankan untuk SSO/OTP.",
             ),
             (
-                "Biarkan browser tetap terbuka",
+                "Biarkan browser tetap terbuka - Opsi lanjutan",
                 "ON: browser tetap terbuka setelah proses selesai.",
+            ),
+            (
+                "Stop saat cooldown (simpan posisi) - Opsi lanjutan",
+                "ON: jika server meminta jeda, proses dihentikan dan baris "
+                "terakhir disimpan untuk dilanjutkan.",
             ),
             (
                 "Hanya sampai halaman DIRGC",
@@ -1343,11 +1630,11 @@ class HomePage(QWidget):
                 "Gunakan menu Update untuk klik Edit Hasil dan memperbarui data.",
             ),
             (
-                "Batas idle (detik)",
+                "Batas idle (detik) - Settings > Advanced",
                 "Jika tidak ada aktivitas, proses dihentikan otomatis.",
             ),
             (
-                "Timeout loading web (detik)",
+                "Timeout loading web (detik) - Settings > Advanced",
                 "Naikkan jika halaman sering lambat saat login atau load data.",
             ),
             (
@@ -1544,11 +1831,75 @@ class SettingsPage(QWidget):
         row_layout.addWidget(self.font_combo)
         appearance_layout.addWidget(row)
         layout.addWidget(appearance_card)
+
+        advanced_card = CardWidget()
+        advanced_layout = QVBoxLayout(advanced_card)
+        advanced_layout.addWidget(SubtitleLabel("Advanced"))
+
+        idle_row = QWidget()
+        idle_layout = QHBoxLayout(idle_row)
+        idle_layout.setContentsMargins(0, 0, 0, 0)
+        idle_layout.setSpacing(12)
+
+        idle_label = StrongBodyLabel("Batas idle (detik)")
+        idle_hint = CaptionLabel(
+            "Jika tidak ada aktivitas, proses dihentikan otomatis."
+        )
+        idle_hint.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
+        idle_hint.setWordWrap(True)
+        idle_text = QWidget()
+        idle_text_layout = QVBoxLayout(idle_text)
+        idle_text_layout.setContentsMargins(0, 0, 0, 0)
+        idle_text_layout.setSpacing(4)
+        idle_text_layout.addWidget(idle_label)
+        idle_text_layout.addWidget(idle_hint)
+        self.idle_timeout_spin = QSpinBox()
+        self.idle_timeout_spin.setRange(IDLE_TIMEOUT_MIN_S, IDLE_TIMEOUT_MAX_S)
+        self.idle_timeout_spin.setValue(load_idle_timeout_s())
+        self.idle_timeout_spin.setSuffix(" s")
+        idle_layout.addWidget(idle_text, stretch=1)
+        idle_layout.addStretch()
+        idle_layout.addWidget(self.idle_timeout_spin)
+        advanced_layout.addWidget(idle_row)
+
+        web_row = QWidget()
+        web_layout = QHBoxLayout(web_row)
+        web_layout.setContentsMargins(0, 0, 0, 0)
+        web_layout.setSpacing(12)
+
+        web_label = StrongBodyLabel("Timeout loading web (detik)")
+        web_hint = CaptionLabel(
+            "Naikkan jika koneksi lambat atau halaman sering timeout."
+        )
+        web_hint.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
+        web_hint.setWordWrap(True)
+        web_text = QWidget()
+        web_text_layout = QVBoxLayout(web_text)
+        web_text_layout.setContentsMargins(0, 0, 0, 0)
+        web_text_layout.setSpacing(4)
+        web_text_layout.addWidget(web_label)
+        web_text_layout.addWidget(web_hint)
+        self.web_timeout_spin = QSpinBox()
+        self.web_timeout_spin.setRange(WEB_TIMEOUT_MIN_S, WEB_TIMEOUT_MAX_S)
+        self.web_timeout_spin.setValue(load_web_timeout_s())
+        self.web_timeout_spin.setSuffix(" s")
+        web_layout.addWidget(web_text, stretch=1)
+        web_layout.addStretch()
+        web_layout.addWidget(self.web_timeout_spin)
+        advanced_layout.addWidget(web_row)
+
+        layout.addWidget(advanced_card)
         layout.addStretch()
         layout.addWidget(build_footer_label())
 
         self.font_combo.currentIndexChanged.connect(
             self._apply_font_scale
+        )
+        self.idle_timeout_spin.valueChanged.connect(
+            self._save_advanced_timeouts
+        )
+        self.web_timeout_spin.valueChanged.connect(
+            self._save_advanced_timeouts
         )
 
     def _apply_font_scale(self):
@@ -1557,6 +1908,12 @@ class SettingsPage(QWidget):
         scale = _normalize_font_scale(text)
         save_font_scale(scale)
         apply_font_scale(self._app, scale)
+
+    def _save_advanced_timeouts(self):
+        save_advanced_timeouts(
+            self.idle_timeout_spin.value(),
+            self.web_timeout_spin.value(),
+        )
 
 
 class RateLimitPage(QWidget):
@@ -1569,7 +1926,7 @@ class RateLimitPage(QWidget):
         layout.setSpacing(12)
         outer_layout.addWidget(scroll)
 
-        title = TitleLabel("Mode Anti Rate Limit")
+        title = TitleLabel("Mode Stabilitas")
         subtitle = BodyLabel(
             "Mode ini mengatur jeda otomatis saat submit agar server "
             "tidak sering menolak permintaan."
@@ -1598,7 +1955,7 @@ class RateLimitPage(QWidget):
         highlight_title = StrongBodyLabel("Sering gagal submit?")
         highlight_desc = BodyLabel(
             "Jika muncul pesan 'Something Went Wrong' saat submit, "
-            "pilih mode Safe atau Yaudah Gapapa, Sabar agar jeda lebih panjang."
+            "pilih mode Safe atau Ultra agar jeda lebih panjang."
         )
         highlight_desc.setWordWrap(True)
         highlight_text_layout.addWidget(highlight_title)
@@ -1628,7 +1985,7 @@ class RateLimitPage(QWidget):
         self._profile_labels = {
             "normal": "Normal (cepat)",
             "safe": "Safe",
-            "ultra": "Yaudah Gapapa, Sabar.",
+            "ultra": "Ultra",
         }
         for key in self._profile_keys:
             self.profile_combo.addItem(
@@ -1673,7 +2030,7 @@ class RateLimitPage(QWidget):
                 "Pakai saat jam sibuk atau 429 sering muncul. Estimasi waktu: ~1.4–1.8x.",
             ),
             (
-                "Yaudah Gapapa, Sabar.",
+                "Ultra",
                 "Pakai jika Safe belum cukup. Estimasi waktu: ~2–3x.",
             ),
         ]
@@ -1694,7 +2051,7 @@ class RateLimitPage(QWidget):
             "Mode ini tidak mengubah data Excel maupun hasil GC. "
             "Hanya mempengaruhi kecepatan dan jeda submit. "
             "Jika sering muncul pesan 'Something Went Wrong', "
-            "pilih mode Safe atau Yaudah Gapapa, Sabar."
+            "pilih mode Safe atau Ultra."
         )
         note_text.setWordWrap(True)
         note_layout.addWidget(note_text)
@@ -1807,7 +2164,7 @@ class MainWindow(FluentWindow):
         self.addSubInterface(self.run_page, FIF.PLAY, "Run")
         self.addSubInterface(self.update_page, FIF.EDIT, "Update")
         self.addSubInterface(
-            self.rate_limit_page, FIF.INFO, "Anti Rate Limit"
+            self.rate_limit_page, FIF.INFO, "Mode Stabilitas"
         )
         self.addSubInterface(
             self.settings_page,
