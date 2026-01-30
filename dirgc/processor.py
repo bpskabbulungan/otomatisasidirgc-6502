@@ -113,6 +113,69 @@ def dismiss_swal_overlays(page, monitor, context="", timeout_s=12):
             return False
 
 
+def _is_bootstrap_modal_visible(page):
+    try:
+        modal = page.locator(".modal.show")
+        total = modal.count()
+    except Exception:
+        return False
+    if total == 0:
+        return False
+    check_total = min(total, 3)
+    for idx in range(check_total):
+        try:
+            if modal.nth(idx).is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def dismiss_bootstrap_modals(page, monitor, context="", timeout_s=10):
+    deadline = time.monotonic() + timeout_s
+    attempts = 0
+    while True:
+        if not _is_bootstrap_modal_visible(page):
+            return True
+        attempts += 1
+        modal = page.locator(".modal.show")
+        current = modal.last if modal.count() > 0 else modal
+        acted = False
+        for selector in ("[data-bs-dismiss='modal']", ".btn-close"):
+            button = current.locator(selector)
+            if button.count() > 0 and button.first.is_enabled():
+                try:
+                    monitor.bot_click(button.first)
+                    acted = True
+                    break
+                except Exception:
+                    continue
+        if not acted:
+            for label in ("Batal", "Tutup", "Close", "Cancel", "OK"):
+                button = current.locator("button", has_text=label)
+                if button.count() > 0 and button.first.is_enabled():
+                    try:
+                        monitor.bot_click(button.first)
+                        acted = True
+                        break
+                    except Exception:
+                        continue
+        if not acted:
+            try:
+                page.keyboard.press("Escape")
+                acted = True
+            except Exception:
+                pass
+        monitor.wait_for_condition(lambda: False, timeout_s=0.3)
+        if time.monotonic() >= deadline:
+            log_warn(
+                "Modal bootstrap tetap terbuka.",
+                context=context or "-",
+                attempts=attempts,
+            )
+            return False
+
+
 def process_excel_rows(
     page,
     monitor,
@@ -394,6 +457,17 @@ def process_excel_rows(
                 note = "Popup SweetAlert tertahan sebelum pilih kartu"
                 monitor.bot_goto(TARGET_URL)
                 continue
+            if not dismiss_bootstrap_modals(
+                page, monitor, context="pre-select card", timeout_s=8
+            ):
+                log_warn(
+                    "Modal dialog tetap terbuka sebelum pilih kartu; skipping.",
+                    idsbr=idsbr or "-",
+                )
+                status = "error"
+                note = "Modal dialog tertahan sebelum pilih kartu"
+                monitor.bot_goto(TARGET_URL)
+                continue
 
             selection = select_matching_card(
                 page, monitor, idsbr, nama_usaha, alamat
@@ -415,6 +489,14 @@ def process_excel_rows(
             except Exception as exc:
                 if _is_swal_overlay_visible(page):
                     dismissed = dismiss_swal_overlays(
+                        page, monitor, context="select card retry", timeout_s=8
+                    )
+                    if dismissed:
+                        monitor.bot_click(header_locator)
+                    else:
+                        raise
+                elif _is_bootstrap_modal_visible(page):
+                    dismissed = dismiss_bootstrap_modals(
                         page, monitor, context="select card retry", timeout_s=8
                     )
                     if dismissed:
@@ -739,7 +821,7 @@ def process_excel_rows(
                     "Server menolak submit; kemungkinan rate limit.",
                     idsbr=idsbr or "-",
                     wait_s=round(wait_penalty, 1),
-                    message=rate_limit_info["text"],
+                    detail=rate_limit_info["text"],
                 )
                 try:
                     popup_locator = page.locator(".swal2-popup")
