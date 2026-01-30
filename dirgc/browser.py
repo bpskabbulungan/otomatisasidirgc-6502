@@ -7,9 +7,11 @@ from .logging_utils import log_info, log_warn
 from .settings import (
     AUTO_LOGIN_RESULT_TIMEOUT_S,
     BLOCK_UI_SELECTOR,
+    DEFAULT_RATE_LIMIT_PROFILE,
     HASIL_GC_LABELS,
     LOGIN_PATH,
     MATCHAPRO_HOST,
+    RATE_LIMIT_PROFILES,
     SSO_HOST,
     TARGET_URL,
 )
@@ -147,25 +149,69 @@ class RequestRateLimiter:
         self._last_penalty_s = 0.0
         self._consecutive_rate_limits = 0
 
+    def configure(
+        self,
+        *,
+        min_interval_s=None,
+        penalty_initial_s=None,
+        penalty_max_s=None,
+        jitter_s=None,
+        cooldown_after=None,
+        cooldown_s=None,
+    ):
+        if min_interval_s is not None:
+            self.min_interval_s = max(0.1, float(min_interval_s))
+        if penalty_initial_s is not None:
+            self.penalty_initial_s = max(0.0, float(penalty_initial_s))
+        if penalty_max_s is not None:
+            self.penalty_max_s = max(
+                self.penalty_initial_s, float(penalty_max_s)
+            )
+        if jitter_s is not None:
+            self.jitter_s = max(0.0, float(jitter_s))
+        if cooldown_after is not None:
+            self.cooldown_after = max(0, int(cooldown_after or 0))
+        if cooldown_s is not None:
+            self.cooldown_s = max(0.0, float(cooldown_s))
+        self.reset_penalty()
 
-FILTER_RATE_LIMITER = RequestRateLimiter(
-    min_interval_s=2.5,
-    penalty_initial_s=8,
-    penalty_max_s=60,
-    jitter_s=0.6,
-)
+
+FILTER_RATE_LIMITER = RequestRateLimiter()
 MAX_RATE_LIMIT_RETRIES = 5
 
 
-SUBMIT_RATE_LIMITER = RequestRateLimiter(
-    min_interval_s=6.0,
-    penalty_initial_s=20,
-    penalty_max_s=180,
-    jitter_s=1.2,
-    cooldown_after=3,
-    cooldown_s=120,
-)
-SUBMIT_POST_SUCCESS_DELAY_S = 4.0
+SUBMIT_RATE_LIMITER = RequestRateLimiter()
+SUBMIT_POST_SUCCESS_DELAY_S = 0.0
+
+
+def apply_rate_limit_profile(profile_name):
+    profile_key = (profile_name or "").strip().lower()
+    if profile_key not in RATE_LIMIT_PROFILES:
+        profile_key = DEFAULT_RATE_LIMIT_PROFILE
+    profile = RATE_LIMIT_PROFILES[profile_key]
+
+    FILTER_RATE_LIMITER.configure(
+        min_interval_s=profile.get("filter_min_interval_s"),
+        penalty_initial_s=profile.get("filter_penalty_initial_s"),
+        penalty_max_s=profile.get("filter_penalty_max_s"),
+        jitter_s=profile.get("filter_jitter_s"),
+    )
+    SUBMIT_RATE_LIMITER.configure(
+        min_interval_s=profile.get("submit_min_interval_s"),
+        penalty_initial_s=profile.get("submit_penalty_initial_s"),
+        penalty_max_s=profile.get("submit_penalty_max_s"),
+        jitter_s=profile.get("submit_jitter_s"),
+        cooldown_after=profile.get("submit_cooldown_after"),
+        cooldown_s=profile.get("submit_cooldown_s"),
+    )
+    global SUBMIT_POST_SUCCESS_DELAY_S
+    SUBMIT_POST_SUCCESS_DELAY_S = float(
+        profile.get("submit_success_delay_s") or 0.0
+    )
+    return profile_key
+
+
+apply_rate_limit_profile(DEFAULT_RATE_LIMIT_PROFILE)
 
 
 def install_user_activity_tracking(page, mark_activity):

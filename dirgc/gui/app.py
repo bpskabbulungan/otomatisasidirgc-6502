@@ -54,7 +54,9 @@ from dirgc.logging_utils import set_log_handler
 from dirgc.settings import (
     DEFAULT_EXCEL_FILE,
     DEFAULT_IDLE_TIMEOUT_MS,
+    DEFAULT_RATE_LIMIT_PROFILE,
     DEFAULT_WEB_TIMEOUT_S,
+    RATE_LIMIT_PROFILES,
 )
 
 GUI_SETTINGS_PATH = os.path.join("config", "gui_settings.json")
@@ -66,6 +68,7 @@ FONT_SCALE_OPTIONS = (100, 110, 120, 125)
 FONT_BASE_PX_PROPERTY = "font_base_px"
 FONT_BASE_PT_PROPERTY = "font_base_pt"
 MUTED_TEXT_COLOR = "#4A4A4A"
+RATE_LIMIT_SETTINGS_KEY = "rate_limit"
 
 
 def load_gui_settings():
@@ -127,6 +130,32 @@ def save_font_scale(value):
         ui_settings = {}
         data["ui"] = ui_settings
     ui_settings["font_scale"] = _normalize_font_scale(value)
+    save_gui_settings(data)
+
+
+def _normalize_rate_limit_profile(value):
+    key = (value or "").strip().lower()
+    if key in RATE_LIMIT_PROFILES:
+        return key
+    return DEFAULT_RATE_LIMIT_PROFILE
+
+
+def load_rate_limit_profile():
+    data = load_gui_settings()
+    options = data.get(RATE_LIMIT_SETTINGS_KEY, {})
+    profile = None
+    if isinstance(options, dict):
+        profile = options.get("profile")
+    return _normalize_rate_limit_profile(profile)
+
+
+def save_rate_limit_profile(value):
+    data = load_gui_settings()
+    options = data.get(RATE_LIMIT_SETTINGS_KEY)
+    if not isinstance(options, dict):
+        options = {}
+        data[RATE_LIMIT_SETTINGS_KEY] = options
+    options["profile"] = _normalize_rate_limit_profile(value)
     save_gui_settings(data)
 
 
@@ -198,6 +227,7 @@ class RunConfig:
     sso_username: Optional[str]
     sso_password: Optional[str]
     web_timeout_s: int
+    rate_limit_profile: str
 
 
 class RunWorker(QThread):
@@ -244,6 +274,7 @@ class RunWorker(QThread):
                 update_mode=self._config.update_mode,
                 update_fields=self._config.update_fields,
                 credentials=credentials,
+                rate_limit_profile=self._config.rate_limit_profile,
                 stop_event=self._stop_event,
                 progress_callback=self._emit_progress,
                 wait_for_close=self._wait_for_close
@@ -951,6 +982,7 @@ class RunPage(QWidget):
             use_sso=use_sso,
             sso_username=sso_username,
             sso_password=sso_password,
+            rate_limit_profile=load_rate_limit_profile(),
         )
 
     def _validate_inputs(self, config: RunConfig):
@@ -1527,6 +1559,203 @@ class SettingsPage(QWidget):
         apply_font_scale(self._app, scale)
 
 
+class RateLimitPage(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+        scroll, layout = build_scroll_area(self)
+        layout.setSpacing(12)
+        outer_layout.addWidget(scroll)
+
+        title = TitleLabel("Mode Anti Rate Limit")
+        subtitle = BodyLabel(
+            "Mode ini mengatur jeda otomatis saat submit agar server "
+            "tidak sering menolak permintaan."
+        )
+        subtitle.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+
+        highlight_card = CardWidget()
+        highlight_card.setStyleSheet(
+            "background-color: #FFF7E6; border: 1px solid #FFD666;"
+        )
+        highlight_layout = QHBoxLayout(highlight_card)
+        highlight_layout.setContentsMargins(14, 10, 14, 10)
+        highlight_layout.setSpacing(10)
+
+        highlight_icon = IconWidget()
+        highlight_icon.setIcon(FIF.INFO)
+        highlight_icon.setFixedSize(26, 26)
+        highlight_layout.addWidget(highlight_icon, alignment=Qt.AlignTop)
+
+        highlight_text = QWidget()
+        highlight_text_layout = QVBoxLayout(highlight_text)
+        highlight_text_layout.setContentsMargins(0, 0, 0, 0)
+        highlight_text_layout.setSpacing(4)
+        highlight_title = StrongBodyLabel("Sering gagal submit?")
+        highlight_desc = BodyLabel(
+            "Jika muncul pesan 'Something Went Wrong' saat submit, "
+            "pilih mode Safe atau Yaudah Gapapa, Sabar agar jeda lebih panjang."
+        )
+        highlight_desc.setWordWrap(True)
+        highlight_text_layout.addWidget(highlight_title)
+        highlight_text_layout.addWidget(highlight_desc)
+        highlight_layout.addWidget(highlight_text, stretch=1)
+        layout.addWidget(highlight_card)
+
+        select_card = CardWidget()
+        select_layout = QVBoxLayout(select_card)
+        select_layout.setSpacing(8)
+        select_layout.addWidget(SubtitleLabel("Pilih Mode"))
+
+        row = QWidget()
+        row_layout = QVBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(4)
+
+        title_label = StrongBodyLabel("Profil kecepatan")
+        hint = CaptionLabel(
+            "Semakin aman, proses makin lama tetapi 429 lebih jarang."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
+
+        self.profile_combo = ComboBox()
+        self._profile_keys = ["normal", "safe", "ultra"]
+        self._profile_labels = {
+            "normal": "Normal (cepat)",
+            "safe": "Safe",
+            "ultra": "Yaudah Gapapa, Sabar.",
+        }
+        for key in self._profile_keys:
+            self.profile_combo.addItem(
+                self._profile_labels.get(key, key)
+            )
+
+        row_layout.addWidget(title_label)
+        row_layout.addWidget(hint)
+        row_layout.addWidget(self.profile_combo, alignment=Qt.AlignLeft)
+        badge_row = QWidget()
+        badge_layout = QHBoxLayout(badge_row)
+        badge_layout.setContentsMargins(0, 0, 0, 0)
+        badge_layout.setSpacing(8)
+        badge_label = CaptionLabel("Mode aktif")
+        badge_label.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
+        self.active_badge = CaptionLabel("-")
+        self.active_badge.setStyleSheet(
+            "padding: 2px 8px; border-radius: 10px;"
+        )
+        badge_layout.addWidget(badge_label)
+        badge_layout.addWidget(self.active_badge)
+        badge_layout.addStretch()
+        row_layout.addWidget(badge_row)
+
+        self.estimate_label = CaptionLabel("Estimasi waktu: -")
+        self.estimate_label.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
+        row_layout.addWidget(self.estimate_label)
+        select_layout.addWidget(row)
+        layout.addWidget(select_card)
+
+        guide_card = CardWidget()
+        guide_layout = QVBoxLayout(guide_card)
+        guide_layout.setSpacing(4)
+        guide_layout.addWidget(SubtitleLabel("Keterangan"))
+        guide_items = [
+            (
+                "Normal (cepat)",
+                "Pakai saat server relatif stabil. Estimasi waktu: ~1x.",
+            ),
+            (
+                "Safe",
+                "Pakai saat jam sibuk atau 429 sering muncul. Estimasi waktu: ~1.4–1.8x.",
+            ),
+            (
+                "Yaudah Gapapa, Sabar.",
+                "Pakai jika Safe belum cukup. Estimasi waktu: ~2–3x.",
+            ),
+        ]
+        for title_text, desc_text in guide_items:
+            title_label = StrongBodyLabel(title_text)
+            desc_label = CaptionLabel(desc_text)
+            desc_label.setWordWrap(True)
+            desc_label.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
+            guide_layout.addWidget(title_label)
+            guide_layout.addWidget(desc_label)
+        layout.addWidget(guide_card)
+
+        note_card = CardWidget()
+        note_layout = QVBoxLayout(note_card)
+        note_layout.setSpacing(4)
+        note_layout.addWidget(SubtitleLabel("Catatan Penting"))
+        note_text = BodyLabel(
+            "Mode ini tidak mengubah data Excel maupun hasil GC. "
+            "Hanya mempengaruhi kecepatan dan jeda submit. "
+            "Jika sering muncul pesan 'Something Went Wrong', "
+            "pilih mode Safe atau Yaudah Gapapa, Sabar."
+        )
+        note_text.setWordWrap(True)
+        note_layout.addWidget(note_text)
+        layout.addWidget(note_card)
+
+        layout.addStretch()
+        layout.addWidget(build_footer_label())
+
+        self.profile_combo.currentIndexChanged.connect(
+            self._apply_profile_selection
+        )
+        self._load_profile()
+
+    def _load_profile(self):
+        selected = load_rate_limit_profile()
+        if selected in self._profile_keys:
+            self.profile_combo.setCurrentIndex(
+                self._profile_keys.index(selected)
+            )
+        self._update_detail(selected)
+
+    def _apply_profile_selection(self):
+        index = self.profile_combo.currentIndex()
+        if index < 0 or index >= len(self._profile_keys):
+            return
+        key = self._profile_keys[index]
+        save_rate_limit_profile(key)
+        self._update_detail(key)
+
+    def _update_detail(self, key):
+        if key == "safe":
+            estimate = "Estimasi waktu: ~1.4–1.8x (lebih lama dari Normal)"
+            self._set_badge_style(
+                "#FA8C16",
+                "#FFF7E6",
+                self._profile_labels.get("safe", "Safe"),
+            )
+        elif key == "ultra":
+            estimate = "Estimasi waktu: ~2–3x (paling lama)"
+            self._set_badge_style(
+                "#CF1322",
+                "#FFF1F0",
+                self._profile_labels.get("ultra", "Ultra"),
+            )
+        else:
+            estimate = "Estimasi waktu: ~1x (paling cepat)"
+            self._set_badge_style(
+                "#096DD9",
+                "#E6F4FF",
+                self._profile_labels.get("normal", "Normal"),
+            )
+        self.estimate_label.setText(estimate)
+
+    def _set_badge_style(self, text_color, bg_color, label):
+        self.active_badge.setText(label)
+        self.active_badge.setStyleSheet(
+            "padding: 2px 8px; border-radius: 10px; "
+            f"background-color: {bg_color}; color: {text_color};"
+        )
+
+
 class PlaceholderPage(QWidget):
     def __init__(self, title, parent=None):
         super().__init__(parent)
@@ -1565,16 +1794,21 @@ class MainWindow(FluentWindow):
             settings_key="options_update",
         )
         self.settings_page = SettingsPage(self._app, self)
+        self.rate_limit_page = RateLimitPage(self)
         self.home_page.setObjectName("home_page")
         self.run_page.setObjectName("run_page")
         self.sso_page.setObjectName("sso_page")
         self.update_page.setObjectName("update_page")
         self.settings_page.setObjectName("settings_page")
+        self.rate_limit_page.setObjectName("rate_limit_page")
 
         self.addSubInterface(self.home_page, FIF.HOME, "Beranda")
         self.addSubInterface(self.sso_page, FIF.PEOPLE, "Akun SSO")
         self.addSubInterface(self.run_page, FIF.PLAY, "Run")
         self.addSubInterface(self.update_page, FIF.EDIT, "Update")
+        self.addSubInterface(
+            self.rate_limit_page, FIF.INFO, "Anti Rate Limit"
+        )
         self.addSubInterface(
             self.settings_page,
             FIF.SETTING,

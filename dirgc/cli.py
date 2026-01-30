@@ -5,18 +5,25 @@ from urllib.parse import urlparse
 
 from playwright.sync_api import sync_playwright
 
-from .browser import ActivityMonitor, ensure_on_dirgc, install_user_activity_tracking
+from .browser import (
+    ActivityMonitor,
+    apply_rate_limit_profile,
+    ensure_on_dirgc,
+    install_user_activity_tracking,
+)
 from .credentials import load_credentials
-from .logging_utils import log_info
+from .logging_utils import log_info, log_warn
 from .processor import process_excel_rows
 from .settings import (
     DEFAULT_CREDENTIALS_FILE,
     DEFAULT_EXCEL_FILE,
     DEFAULT_IDLE_TIMEOUT_MS,
+    DEFAULT_RATE_LIMIT_PROFILE,
     DEFAULT_WEB_TIMEOUT_S,
     BLOCK_RESOURCE_DOMAINS,
     BLOCK_RESOURCE_TYPES,
     ENABLE_RESOURCE_BLOCKING,
+    RATE_LIMIT_PROFILES,
 )
 
 
@@ -108,6 +115,15 @@ def build_parser():
             "pisahkan dengan koma (hasil_gc,nama_usaha,alamat,latitude,longitude,koordinat)."
         ),
     )
+    parser.add_argument(
+        "--rate-limit-profile",
+        choices=sorted(RATE_LIMIT_PROFILES.keys()),
+        default=DEFAULT_RATE_LIMIT_PROFILE,
+        help=(
+            "Profil jeda untuk mengurangi rate limit saat submit "
+            f"(default: {DEFAULT_RATE_LIMIT_PROFILE})."
+        ),
+    )
     coord_group = parser.add_mutually_exclusive_group()
     coord_group.add_argument(
         "--prefer-excel-coords",
@@ -157,8 +173,10 @@ def run_dirgc(
     stop_event=None,
     progress_callback=None,
     wait_for_close=None,
+    rate_limit_profile=DEFAULT_RATE_LIMIT_PROFILE,
 ):
     ensure_playwright_browsers()
+    apply_rate_limit_profile(rate_limit_profile)
     credentials_value = credentials
     if not manual_only and credentials_value is None:
         credentials_value = load_credentials(credentials_file)
@@ -213,6 +231,7 @@ def run_dirgc(
 
             context.route("**/*", _route_handler)
         page = context.new_page()
+        install_429_response_logger(page)
         page.set_default_timeout(web_timeout_s * 1000)
         page.set_default_navigation_timeout(web_timeout_s * 1000)
         def speed_route(route, request):
@@ -292,6 +311,72 @@ def run_dirgc(
         browser.close()
 
 
+def install_429_response_logger(page, body_limit=800):
+    def _truncate(text, limit):
+        if text is None:
+            return ""
+        text = str(text)
+        if len(text) <= limit:
+            return text
+        return f"{text[:limit]}... (truncated {len(text) - limit} chars)"
+
+    def handle_response(response):
+        try:
+            status = response.status
+        except Exception:
+            return
+        if status != 429:
+            return
+
+        method = ""
+        url = ""
+        try:
+            url = response.url or ""
+        except Exception:
+            url = ""
+        try:
+            request = response.request
+            method = request.method or ""
+        except Exception:
+            method = ""
+
+        headers = {}
+        try:
+            headers = response.headers or {}
+        except Exception:
+            headers = {}
+        retry_after = headers.get("retry-after") or headers.get("Retry-After")
+        content_type = headers.get("content-type") or headers.get(
+            "Content-Type"
+        )
+
+        body_text = ""
+        body_error = ""
+        try:
+            body_text = response.text() or ""
+        except Exception as exc:
+            try:
+                body_bytes = response.body()
+                body_text = body_bytes.decode("utf-8", errors="replace")
+            except Exception as inner:
+                body_error = str(inner) or str(exc)
+
+        body_text = _truncate(body_text.strip(), body_limit) if body_text else ""
+
+        log_warn(
+            "HTTP 429 response captured.",
+            status=status,
+            method=method or "-",
+            url=url or "-",
+            retry_after=retry_after or "-",
+            content_type=content_type or "-",
+            body=body_text,
+            body_error=body_error,
+        )
+
+    page.on("response", handle_response)
+
+
 def main():
     parser = build_parser()
     args = parser.parse_args()
@@ -323,6 +408,7 @@ def main():
         prefer_excel_coords=not args.prefer_web_coords,
         update_mode=args.update_mode,
         update_fields=update_fields,
+        rate_limit_profile=args.rate_limit_profile,
     )
 
 

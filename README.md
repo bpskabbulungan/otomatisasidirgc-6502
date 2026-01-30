@@ -162,6 +162,8 @@ Setelah GUI terbuka:
 5. Di menu `Update`, pilih field yang ingin diperbarui (Hasil GC, Nama, Alamat, Koordinat).
    Jika field dipilih tetapi nilai Excel kosong, baris akan ditolak (status `gagal`).
    Untuk koordinat, boleh isi salah satu saja (latitude atau longitude).
+6. Jika sering muncul pesan *Something Went Wrong* saat submit, buka menu
+   `Anti Rate Limit` dan pilih mode agar jeda antar submit lebih panjang dan 429 lebih jarang muncul.
 
 ## Cara Menjalankan - Script atau Terminal
 
@@ -203,6 +205,7 @@ Perintah di atas hanya memproses baris 1 sampai 5 (1-based, inklusif).
 - `--update-mode` untuk menggunakan tombol Edit Hasil (update data).
 - `--prefer-web-coords` untuk mempertahankan koordinat yang sudah terisi di web.
 - `--update-fields` untuk memilih field yang di-update (contoh: `hasil_gc,nama_usaha,alamat,koordinat`).
+- `--rate-limit-profile` untuk mengatur kecepatan submit (normal/safe/ultra).
 
 Auto-login akan mencoba kredensial terlebih dulu; jika gagal/OTP muncul, akan beralih ke manual login.
 Secara default, koordinat diisi dari Excel (jika ada), meskipun web sudah berisi.
