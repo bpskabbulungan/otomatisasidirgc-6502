@@ -1,3 +1,5 @@
+import json
+import re
 import time
 
 from .browser import (
@@ -8,6 +10,7 @@ from .browser import (
     get_server_cooldown_remaining,
     hasil_gc_select,
     is_visible,
+    set_server_cooldown,
     wait_with_keepalive,
     wait_for_block_ui_clear,
 )
@@ -179,6 +182,264 @@ def dismiss_bootstrap_modals(page, monitor, context="", timeout_s=10):
             return False
 
 
+def _parse_int(value):
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_cooldown_seconds(body_text, headers):
+    seconds = 0
+    reason = ""
+    retry_after = None
+    if headers:
+        retry_after = headers.get("retry-after") or headers.get("Retry-After")
+    retry_seconds = _parse_int(retry_after)
+    if retry_seconds is not None:
+        seconds = max(seconds, retry_seconds)
+
+    text = (body_text or "").strip()
+    if text:
+        parsed = None
+        if text.startswith("{") or text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                parsed = None
+        if isinstance(parsed, dict):
+            message = parsed.get("message") or ""
+            reason = message or reason
+            retry_after_body = _parse_int(parsed.get("retry_after"))
+            if retry_after_body is not None:
+                seconds = max(seconds, retry_after_body)
+            text = message or text
+
+        match = re.search(
+            r"(?:tunggu|wait)\s+(\d+)\s*(menit|minute|detik|second|jam|hour)",
+            text.lower(),
+        )
+        if match:
+            value = _parse_int(match.group(1)) or 0
+            unit = match.group(2)
+            if unit in ("menit", "minute"):
+                seconds = max(seconds, value * 60)
+            elif unit in ("jam", "hour"):
+                seconds = max(seconds, value * 3600)
+            else:
+                seconds = max(seconds, value)
+    return seconds, reason
+
+
+def _collect_form_payload(page):
+    try:
+        payload = page.evaluate(
+            """
+            () => {
+              const button = document.querySelector("#save-tandai-usaha-btn");
+              const form = button ? button.closest("form") : document.querySelector("form");
+              if (!form) return null;
+              const data = new FormData(form);
+              const out = {};
+              for (const [key, value] of data.entries()) {
+                if (out[key] === undefined) {
+                  out[key] = value;
+                } else if (Array.isArray(out[key])) {
+                  out[key].push(value);
+                } else {
+                  out[key] = [out[key], value];
+                }
+              }
+              return out;
+            }
+            """
+        )
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _extract_csrf_token(page):
+    try:
+        locator = page.locator('meta[name="csrf-token"]')
+        if locator.count() > 0:
+            return locator.first.get_attribute("content") or ""
+    except Exception:
+        return ""
+    return ""
+
+
+def _extract_gc_token(page):
+    try:
+        value = page.evaluate(
+            "() => window.gcSubmitToken || window.gc_submit_token || null"
+        )
+        if value:
+            return str(value)
+    except Exception:
+        pass
+    try:
+        content = page.content()
+    except Exception:
+        return ""
+    match = re.search(
+        r"gcSubmitToken\\s*=\\s*['\\\"]([^'\\\"]+)['\\\"]", content
+    )
+    if match:
+        return match.group(1)
+    return ""
+
+
+def _extract_perusahaan_id(page):
+    selectors = ["input[name='perusahaan_id']", "input#perusahaan_id"]
+    for selector in selectors:
+        try:
+            locator = page.locator(selector)
+            if locator.count() > 0:
+                value = locator.first.get_attribute("value")
+                if value:
+                    return str(value)
+                value = locator.first.input_value()
+                if value:
+                    return str(value)
+        except Exception:
+            continue
+    return ""
+
+
+def _set_payload_value(payload, key, value):
+    if value is None:
+        return
+    payload[key] = str(value)
+
+
+def _build_request_payload(
+    page,
+    *,
+    update_hasil_gc,
+    hasil_gc_value,
+    update_lat,
+    latitude_value,
+    update_lon,
+    longitude_value,
+    update_nama,
+    nama_value,
+    update_alamat,
+    alamat_value,
+    gc_token_override=None,
+):
+    payload = _collect_form_payload(page)
+
+    if update_hasil_gc and hasil_gc_value is not None:
+        _set_payload_value(payload, "hasilgc", hasil_gc_value)
+    if update_lat and latitude_value is not None:
+        _set_payload_value(payload, "latitude", latitude_value)
+    if update_lon and longitude_value is not None:
+        _set_payload_value(payload, "longitude", longitude_value)
+
+    if update_nama:
+        if "edit_nama" not in payload:
+            payload["edit_nama"] = "1" if str(nama_value or "").strip() else "0"
+        if "nama_usaha" not in payload:
+            payload["nama_usaha"] = str(nama_value or "")
+    if update_alamat:
+        if "edit_alamat" not in payload:
+            payload["edit_alamat"] = "1" if str(alamat_value or "").strip() else "0"
+        if "alamat_usaha" not in payload:
+            payload["alamat_usaha"] = str(alamat_value or "")
+
+    csrf_token = _extract_csrf_token(page)
+    if csrf_token:
+        payload["_token"] = csrf_token
+
+    gc_token = gc_token_override or payload.get("gc_token") or _extract_gc_token(page)
+    if gc_token:
+        payload["gc_token"] = gc_token
+
+    if not payload.get("perusahaan_id"):
+        perusahaan_id = _extract_perusahaan_id(page)
+        if perusahaan_id:
+            payload["perusahaan_id"] = perusahaan_id
+
+    return payload, gc_token
+
+
+def _submit_via_request(page, payload, url, headers, timeout_ms=30000):
+    try:
+        response = page.request.post(
+            url, form=payload, headers=headers, timeout=timeout_ms
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": "error",
+            "message": str(exc),
+        }
+
+    status_code = response.status
+    response_text = ""
+    response_json = None
+    try:
+        response_text = response.text() or ""
+    except Exception:
+        response_text = ""
+    try:
+        response_json = response.json()
+    except Exception:
+        response_json = None
+
+    message = ""
+    if isinstance(response_json, dict):
+        message = response_json.get("message") or ""
+    if not message:
+        message = response_text.strip()
+
+    if status_code == 200:
+        if isinstance(response_json, dict) and response_json.get("status") == "error":
+            return {
+                "ok": False,
+                "status": "error",
+                "message": message or "Server mengembalikan status error.",
+                "json": response_json,
+            }
+        return {
+            "ok": True,
+            "status": "success",
+            "message": message or "Submit sukses (request).",
+            "json": response_json,
+        }
+
+    if status_code == 429:
+        resp_headers = {}
+        try:
+            resp_headers = response.headers or {}
+        except Exception:
+            resp_headers = {}
+        cooldown_seconds, reason = _extract_cooldown_seconds(
+            response_text, resp_headers
+        )
+        return {
+            "ok": False,
+            "status": "rate_limit",
+            "message": message or "HTTP 429",
+            "cooldown_s": cooldown_seconds,
+            "reason": reason,
+        }
+
+    if status_code == 419 or "csrf token mismatch" in (message or "").lower():
+        return {
+            "ok": False,
+            "status": "csrf",
+            "message": message or "CSRF token mismatch.",
+        }
+
+    return {
+        "ok": False,
+        "status": "error",
+        "message": message or f"HTTP {status_code}",
+        "status_code": status_code,
+    }
+
 def process_excel_rows(
     page,
     monitor,
@@ -192,6 +453,8 @@ def process_excel_rows(
     start_row=None,
     end_row=None,
     progress_callback=None,
+    submit_mode="ui",
+    session_refresh_every=0,
     stop_on_cooldown=False,
 ):
     run_log_path = build_run_log_path()
@@ -291,6 +554,16 @@ def process_excel_rows(
     cooldown_reason = None
     checkpoint_every = int(RUN_LOG_CHECKPOINT_EVERY or 0)
     last_checkpoint = 0
+    session_submit_count = 0
+    session_refresh_pending = False
+    request_gc_token = None
+    submit_mode = (submit_mode or "ui").strip().lower()
+    if submit_mode not in ("ui", "request"):
+        submit_mode = "ui"
+    try:
+        session_refresh_every = int(session_refresh_every or 0)
+    except (TypeError, ValueError):
+        session_refresh_every = 0
 
     def checkpoint_run_log(force=False):
         nonlocal last_checkpoint
@@ -393,12 +666,37 @@ def process_excel_rows(
 
         try:
             monitor.idle_check()
-            ensure_on_dirgc(
-                page,
-                monitor=monitor,
-                use_saved_credentials=use_saved_credentials,
-                credentials=credentials,
-            )
+            did_refresh = False
+            if session_refresh_pending or (
+                session_refresh_every and session_submit_count >= session_refresh_every
+            ):
+                reason = (
+                    "pending"
+                    if session_refresh_pending
+                    else f"interval={session_refresh_every}"
+                )
+                log_info("Auto session refresh.", reason=reason)
+                try:
+                    page.reload()
+                except Exception:
+                    pass
+                ensure_on_dirgc(
+                    page,
+                    monitor=monitor,
+                    use_saved_credentials=use_saved_credentials,
+                    credentials=credentials,
+                )
+                session_submit_count = 0
+                session_refresh_pending = False
+                request_gc_token = None
+                did_refresh = True
+            if not did_refresh:
+                ensure_on_dirgc(
+                    page,
+                    monitor=monitor,
+                    use_saved_credentials=use_saved_credentials,
+                    credentials=credentials,
+                )
             remaining, reason = get_server_cooldown_remaining()
             if remaining > 0:
                 resume_at = time.strftime(
@@ -867,6 +1165,95 @@ def process_excel_rows(
                 submit_locator.first.scroll_into_view_if_needed()
             except Exception:
                 pass
+            if submit_mode == "request":
+                request_payload, gc_token_value = _build_request_payload(
+                    page,
+                    update_hasil_gc=update_hasil_gc,
+                    hasil_gc_value=hasil_gc_after or hasil_gc,
+                    update_lat=update_lat,
+                    latitude_value=latitude_value,
+                    update_lon=update_lon,
+                    longitude_value=longitude_value,
+                    update_nama=update_nama or edit_nama_alamat,
+                    nama_value=nama_after or nama_usaha,
+                    update_alamat=update_alamat or edit_nama_alamat,
+                    alamat_value=alamat_after or alamat,
+                    gc_token_override=request_gc_token,
+                )
+                if gc_token_value:
+                    request_gc_token = gc_token_value
+
+                missing_fields = []
+                if not request_payload.get("perusahaan_id"):
+                    missing_fields.append("perusahaan_id")
+                if not request_payload.get("_token"):
+                    missing_fields.append("_token")
+                if not request_payload.get("gc_token"):
+                    missing_fields.append("gc_token")
+
+                if missing_fields:
+                    log_warn(
+                        "Submit via request tidak siap; fallback ke UI.",
+                        idsbr=idsbr or "-",
+                        missing=", ".join(missing_fields),
+                    )
+                else:
+                    post_headers = {
+                        "origin": "https://matchapro.web.bps.go.id",
+                        "referer": TARGET_URL,
+                        "x-requested-with": "XMLHttpRequest",
+                    }
+                    result = _submit_via_request(
+                        page,
+                        request_payload,
+                        url=f"{TARGET_URL}/konfirmasi-user",
+                        headers=post_headers,
+                    )
+                    if result.get("status") == "rate_limit":
+                        wait_penalty = SUBMIT_RATE_LIMITER.penalize()
+                        cooldown_s = result.get("cooldown_s") or 0
+                        if cooldown_s:
+                            set_server_cooldown(
+                                cooldown_s, reason=result.get("reason") or ""
+                            )
+                        status = "error"
+                        note = (
+                            "Submit ditolak server (HTTP 429/rate limit). "
+                            f"{result.get('message') or ''}".strip()
+                        )
+                        monitor.bot_goto(TARGET_URL)
+                        continue
+                    if result.get("status") == "csrf":
+                        session_refresh_pending = True
+                        status = "error"
+                        note = (
+                            "Submit gagal: CSRF token mismatch. "
+                            "Session akan di-refresh."
+                        )
+                        monitor.bot_goto(TARGET_URL)
+                        continue
+                    if result.get("ok"):
+                        payload_json = result.get("json")
+                        if isinstance(payload_json, dict):
+                            new_token = payload_json.get("new_gc_token")
+                            if new_token:
+                                request_gc_token = str(new_token)
+                        SUBMIT_RATE_LIMITER.reset_penalty()
+                        if SUBMIT_POST_SUCCESS_DELAY_S > 0:
+                            monitor.wait_for_condition(
+                                lambda: False,
+                                timeout_s=SUBMIT_POST_SUCCESS_DELAY_S,
+                            )
+                        status = "berhasil"
+                        note = result.get("message") or "Submit sukses (request)."
+                        session_submit_count += 1
+                        monitor.bot_goto(TARGET_URL)
+                        continue
+
+                    status = "error"
+                    note = result.get("message") or "Submit via request gagal."
+                    monitor.bot_goto(TARGET_URL)
+                    continue
             try:
                 monitor.bot_click(submit_locator.first)
             except Exception as exc:
@@ -1059,6 +1446,7 @@ def process_excel_rows(
                 )
             status = "berhasil"
             note = "Submit sukses"
+            session_submit_count += 1
         except Exception as exc:
             message = str(exc)
             if "Run stopped by user." in message:

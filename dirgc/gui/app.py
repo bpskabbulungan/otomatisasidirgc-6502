@@ -57,6 +57,7 @@ from dirgc.settings import (
     DEFAULT_EXCEL_FILE,
     DEFAULT_IDLE_TIMEOUT_MS,
     DEFAULT_RATE_LIMIT_PROFILE,
+    DEFAULT_SESSION_REFRESH_EVERY,
     DEFAULT_WEB_TIMEOUT_S,
     RATE_LIMIT_PROFILES,
 )
@@ -320,6 +321,8 @@ class RunConfig:
     sso_password: Optional[str]
     web_timeout_s: int
     rate_limit_profile: str
+    submit_mode: str
+    session_refresh_every: int
     stop_on_cooldown: bool
 
 
@@ -368,6 +371,8 @@ class RunWorker(QThread):
                 update_fields=self._config.update_fields,
                 credentials=credentials,
                 rate_limit_profile=self._config.rate_limit_profile,
+                submit_mode=self._config.submit_mode,
+                session_refresh_every=self._config.session_refresh_every,
                 stop_on_cooldown=self._config.stop_on_cooldown,
                 stop_event=self._stop_event,
                 progress_callback=self._emit_progress,
@@ -667,6 +672,45 @@ class RunPage(QWidget):
             self.stop_on_cooldown_switch,
         )
         advanced_layout.addWidget(cooldown_row)
+
+        self.submit_request_switch = SwitchButton()
+        self.submit_request_switch.setChecked(False)
+        advanced_layout.addWidget(
+            self._make_option_row(
+                "Submit via request (API)",
+                "ON: kirim POST langsung ke endpoint konfirmasi. "
+                "Pastikan sesuai aturan akses yang berlaku.",
+                self.submit_request_switch,
+            )
+        )
+
+        refresh_row = QWidget()
+        refresh_layout = QHBoxLayout(refresh_row)
+        refresh_layout.setContentsMargins(0, 0, 0, 0)
+        refresh_layout.setSpacing(12)
+
+        refresh_text = QWidget()
+        refresh_text_layout = QVBoxLayout(refresh_text)
+        refresh_text_layout.setContentsMargins(0, 0, 0, 0)
+        refresh_text_layout.setSpacing(4)
+
+        refresh_title = StrongBodyLabel("Auto refresh session")
+        refresh_desc = CaptionLabel(
+            "Refresh session tiap N submit sukses. 0 = nonaktif."
+        )
+        refresh_desc.setWordWrap(True)
+        refresh_desc.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
+
+        refresh_text_layout.addWidget(refresh_title)
+        refresh_text_layout.addWidget(refresh_desc)
+
+        self.session_refresh_spin = QSpinBox()
+        self.session_refresh_spin.setRange(0, 1000000)
+        self.session_refresh_spin.setValue(DEFAULT_SESSION_REFRESH_EVERY)
+
+        refresh_layout.addWidget(refresh_text, stretch=1)
+        refresh_layout.addWidget(self.session_refresh_spin)
+        advanced_layout.addWidget(refresh_row)
 
         self.headless_switch = SwitchButton()
         self.headless_switch.setChecked(False)
@@ -1015,12 +1059,31 @@ class RunPage(QWidget):
             )
         else:
             self.stop_on_cooldown_switch.setChecked(False)
+        if "submit_via_request" in options:
+            self.submit_request_switch.setChecked(
+                bool(options["submit_via_request"])
+            )
+        else:
+            self.submit_request_switch.setChecked(False)
+        if "session_refresh_every" in options:
+            try:
+                self.session_refresh_spin.setValue(
+                    int(options["session_refresh_every"])
+                )
+            except (TypeError, ValueError):
+                self.session_refresh_spin.setValue(
+                    DEFAULT_SESSION_REFRESH_EVERY
+                )
+        else:
+            self.session_refresh_spin.setValue(DEFAULT_SESSION_REFRESH_EVERY)
         if hasattr(self, "advanced_switch"):
             advanced_active = any(
                 [
                     self.headless_switch.isChecked(),
                     self.keep_open_switch.isChecked(),
                     self.stop_on_cooldown_switch.isChecked(),
+                    self.submit_request_switch.isChecked(),
+                    self.session_refresh_spin.value() > 0,
                 ]
             )
             self.advanced_switch.setChecked(advanced_active)
@@ -1060,6 +1123,8 @@ class RunPage(QWidget):
             "edit_nama_alamat": self.edit_nama_alamat_switch.isChecked(),
             "prefer_web_coords": self.prefer_web_coords_switch.isChecked(),
             "stop_on_cooldown": self.stop_on_cooldown_switch.isChecked(),
+            "submit_via_request": self.submit_request_switch.isChecked(),
+            "session_refresh_every": self.session_refresh_spin.value(),
             "range_enabled": self.range_switch.isChecked(),
             "start_row": self.start_spin.value(),
             "end_row": self.end_spin.value(),
@@ -1093,6 +1158,8 @@ class RunPage(QWidget):
             self.edit_nama_alamat_switch,
             self.prefer_web_coords_switch,
             self.stop_on_cooldown_switch,
+            self.submit_request_switch,
+            self.session_refresh_spin,
         ]:
             widget.setEnabled(enabled)
         for switch in self._update_fields.values():
@@ -1242,6 +1309,8 @@ class RunPage(QWidget):
 
         idle_timeout_s = load_idle_timeout_s()
         web_timeout_s = load_web_timeout_s()
+        submit_mode = "request" if self.submit_request_switch.isChecked() else "ui"
+        session_refresh_every = self.session_refresh_spin.value()
 
         return RunConfig(
             headless=self.headless_switch.isChecked(),
@@ -1261,6 +1330,8 @@ class RunPage(QWidget):
             sso_username=sso_username,
             sso_password=sso_password,
             rate_limit_profile=load_rate_limit_profile(),
+            submit_mode=submit_mode,
+            session_refresh_every=session_refresh_every,
             stop_on_cooldown=self.stop_on_cooldown_switch.isChecked(),
         )
 

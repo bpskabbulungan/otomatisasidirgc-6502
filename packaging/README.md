@@ -8,7 +8,7 @@ Run:
 .\packaging\build_exe.ps1
 ```
 
-Output will be created in `dist/DIRGC-Automation.exe`.
+Output will be created in `dist/filename.exe`.
 This build script also downloads and embeds Chromium so end users don't need to install Playwright.
 
 ## Build Installer (Inno Setup)

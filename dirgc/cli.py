@@ -3,7 +3,7 @@ import json
 import os
 import re
 import sys
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from playwright.sync_api import sync_playwright
 
@@ -16,17 +16,22 @@ from .browser import (
 )
 from .credentials import load_credentials
 from .logging_utils import log_info, log_warn
+from .vpn import ensure_vpn_connected
 from .processor import process_excel_rows
 from .settings import (
     DEFAULT_CREDENTIALS_FILE,
     DEFAULT_EXCEL_FILE,
     DEFAULT_IDLE_TIMEOUT_MS,
     DEFAULT_RATE_LIMIT_PROFILE,
+    DEFAULT_SESSION_REFRESH_EVERY,
+    DEFAULT_SUBMIT_MODE,
     DEFAULT_WEB_TIMEOUT_S,
     BLOCK_RESOURCE_DOMAINS,
     BLOCK_RESOURCE_TYPES,
     ENABLE_RESOURCE_BLOCKING,
     RATE_LIMIT_PROFILES,
+    DEFAULT_VPN_PREFIXES,
+    SUBMIT_MODES,
 )
 
 
@@ -128,6 +133,31 @@ def build_parser():
         ),
     )
     parser.add_argument(
+        "--submit-mode",
+        choices=sorted(SUBMIT_MODES),
+        default=DEFAULT_SUBMIT_MODE,
+        help=(
+            "Metode submit: ui (default) memakai klik UI, "
+            "request memakai POST langsung ke endpoint konfirmasi."
+        ),
+    )
+    parser.add_argument(
+        "--session-refresh-every",
+        type=int,
+        default=DEFAULT_SESSION_REFRESH_EVERY,
+        help=(
+            "Refresh session otomatis setiap N submit sukses "
+            "(0 untuk menonaktifkan)."
+        ),
+    )
+    parser.add_argument(
+        "--vpn-prefixes",
+        help=(
+            "Prefix IP VPN yang dianggap valid (contoh: 10.,172.16.). "
+            "Pisahkan dengan koma."
+        ),
+    )
+    parser.add_argument(
         "--stop-on-cooldown",
         action="store_true",
         help=(
@@ -185,8 +215,17 @@ def run_dirgc(
     progress_callback=None,
     wait_for_close=None,
     rate_limit_profile=DEFAULT_RATE_LIMIT_PROFILE,
+    submit_mode=DEFAULT_SUBMIT_MODE,
+    session_refresh_every=DEFAULT_SESSION_REFRESH_EVERY,
+    vpn_prefixes=None,
     stop_on_cooldown=False,
 ):
+    prefixes = None
+    if isinstance(vpn_prefixes, str) and vpn_prefixes.strip():
+        prefixes = [item.strip() for item in vpn_prefixes.split(",")]
+    elif isinstance(DEFAULT_VPN_PREFIXES, (list, tuple)):
+        prefixes = list(DEFAULT_VPN_PREFIXES)
+    ensure_vpn_connected(prefixes)
     ensure_playwright_browsers()
     apply_rate_limit_profile(rate_limit_profile)
     credentials_value = credentials
@@ -311,6 +350,8 @@ def run_dirgc(
                 start_row=start_row,
                 end_row=end_row,
                 progress_callback=progress_callback,
+                submit_mode=submit_mode,
+                session_refresh_every=session_refresh_every,
                 stop_on_cooldown=stop_on_cooldown,
             )
 
@@ -383,7 +424,7 @@ def _extract_cooldown_seconds(body_text, headers):
     return seconds, reason
 
 
-def install_429_response_logger(page, body_limit=800):
+def install_429_response_logger(page, body_limit=800, request_body_limit=800):
     def _truncate(text, limit):
         if text is None:
             return ""
@@ -392,25 +433,70 @@ def install_429_response_logger(page, body_limit=800):
             return text
         return f"{text[:limit]}... (truncated {len(text) - limit} chars)"
 
+    def _redact_payload(text):
+        if not text:
+            return ""
+        sensitive = {
+            "password",
+            "pass",
+            "otp",
+            "token",
+            "_token",
+            "gc_token",
+            "authorization",
+        }
+        try:
+            if text.strip().startswith("{"):
+                parsed = json.loads(text)
+                if isinstance(parsed, dict):
+                    for key in list(parsed.keys()):
+                        if key.lower() in sensitive:
+                            parsed[key] = "***"
+                    return json.dumps(parsed, ensure_ascii=False)
+        except Exception:
+            pass
+        try:
+            parsed = parse_qs(text, keep_blank_values=True)
+            if parsed:
+                redacted = {}
+                for key, values in parsed.items():
+                    if key.lower() in sensitive:
+                        redacted[key] = ["***"]
+                    else:
+                        redacted[key] = values
+                parts = []
+                for key, values in redacted.items():
+                    for value in values:
+                        parts.append(f"{key}={value}")
+                return "&".join(parts)
+        except Exception:
+            pass
+        return text
+
     def handle_response(response):
         try:
             status = response.status
         except Exception:
             return
-        if status != 429:
+        if status < 400:
             return
 
-        method = ""
         url = ""
+        method = ""
+        request_body = ""
         try:
             url = response.url or ""
         except Exception:
             url = ""
+        if MATCHAPRO_HOST not in url:
+            return
         try:
             request = response.request
             method = request.method or ""
+            request_body = request.post_data or ""
         except Exception:
             method = ""
+            request_body = ""
 
         headers = {}
         try:
@@ -435,23 +521,28 @@ def install_429_response_logger(page, body_limit=800):
 
         raw_body_text = body_text.strip() if body_text else ""
         body_text = _truncate(raw_body_text, body_limit) if raw_body_text else ""
+        request_body = _truncate(
+            _redact_payload(request_body.strip()), request_body_limit
+        )
 
         log_warn(
-            "HTTP 429 response captured.",
+            "HTTP error response captured.",
             status=status,
             method=method or "-",
             url=url or "-",
             retry_after=retry_after or "-",
             content_type=content_type or "-",
             body=body_text,
+            request_body=request_body or "-",
             body_error=body_error,
         )
 
-        cooldown_seconds, reason = _extract_cooldown_seconds(
-            raw_body_text, headers
-        )
-        if cooldown_seconds:
-            set_server_cooldown(cooldown_seconds, reason=reason)
+        if status == 429:
+            cooldown_seconds, reason = _extract_cooldown_seconds(
+                raw_body_text, headers
+            )
+            if cooldown_seconds:
+                set_server_cooldown(cooldown_seconds, reason=reason)
 
     page.on("response", handle_response)
 
@@ -488,6 +579,9 @@ def main():
         update_mode=args.update_mode,
         update_fields=update_fields,
         rate_limit_profile=args.rate_limit_profile,
+        submit_mode=args.submit_mode,
+        session_refresh_every=args.session_refresh_every,
+        vpn_prefixes=args.vpn_prefixes,
         stop_on_cooldown=args.stop_on_cooldown,
     )
 
