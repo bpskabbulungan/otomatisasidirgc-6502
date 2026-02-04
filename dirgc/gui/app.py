@@ -335,7 +335,6 @@ class RunConfig:
     stop_on_cooldown: bool
     recap: bool
     recap_length: int
-    recap_status_filter: str
     recap_output_dir: Optional[str]
     recap_sleep_ms: int
     recap_max_retries: int
@@ -392,7 +391,6 @@ class RunWorker(QThread):
                 stop_on_cooldown=self._config.stop_on_cooldown,
                 recap=self._config.recap,
                 recap_length=self._config.recap_length,
-                recap_status_filter=self._config.recap_status_filter,
                 recap_output_dir=self._config.recap_output_dir,
                 recap_sleep_ms=self._config.recap_sleep_ms,
                 recap_max_retries=self._config.recap_max_retries,
@@ -1346,7 +1344,6 @@ class RunPage(QWidget):
             stop_on_cooldown=self.stop_on_cooldown_switch.isChecked(),
             recap=False,
             recap_length=500,
-            recap_status_filter="semua",
             recap_output_dir=None,
             recap_sleep_ms=800,
             recap_max_retries=3,
@@ -1772,7 +1769,6 @@ class RecapPage(RunPage):
             stop_on_cooldown=False,
             recap=True,
             recap_length=self.length_spin.value(),
-            recap_status_filter="semua",
             recap_output_dir=output_dir,
             recap_sleep_ms=self.sleep_spin.value(),
             recap_max_retries=self.retry_spin.value(),
