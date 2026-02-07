@@ -25,6 +25,7 @@ from .settings import (
     DEFAULT_EXCEL_FILE,
     DEFAULT_IDLE_TIMEOUT_MS,
     DEFAULT_RATE_LIMIT_PROFILE,
+    DEFAULT_RECAP_LENGTH,
     DEFAULT_SESSION_REFRESH_EVERY,
     DEFAULT_SUBMIT_MODE,
     DEFAULT_WEB_TIMEOUT_S,
@@ -33,6 +34,8 @@ from .settings import (
     ENABLE_RESOURCE_BLOCKING,
     MATCHAPRO_HOST,
     RATE_LIMIT_PROFILES,
+    RECAP_LENGTH_MAX,
+    RECAP_LENGTH_WARN_THRESHOLD,
     DEFAULT_VPN_PREFIXES,
     SUBMIT_MODES,
 )
@@ -126,8 +129,12 @@ def build_parser():
         "--recap-length",
         dest="recap_length",
         type=int,
-        default=500,
-        help="Pagination size for recap (default: 500).",
+        default=DEFAULT_RECAP_LENGTH,
+        help=(
+            f"Pagination size for recap (default: {DEFAULT_RECAP_LENGTH}). "
+            "Bigger = fewer requests but heavier per page; server may cap. "
+            f"Max {RECAP_LENGTH_MAX}; above {RECAP_LENGTH_WARN_THRESHOLD} warns."
+        ),
     )
     parser.add_argument(
         "--recap-output-dir",
@@ -316,7 +323,7 @@ def run_dirgc(
     api_log_body_limit=2000,
     api_log_wait_s=20,
     recap=False,
-    recap_length=500,
+    recap_length=DEFAULT_RECAP_LENGTH,
     recap_output_dir=None,
     recap_sleep_ms=800,
     recap_max_retries=3,

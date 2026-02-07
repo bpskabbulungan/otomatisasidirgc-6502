@@ -57,10 +57,13 @@ from dirgc.resume_state import load_resume_state
 from dirgc.settings import (
     DEFAULT_EXCEL_FILE,
     DEFAULT_IDLE_TIMEOUT_MS,
+    DEFAULT_RECAP_LENGTH,
     DEFAULT_RATE_LIMIT_PROFILE,
     DEFAULT_SESSION_REFRESH_EVERY,
     DEFAULT_WEB_TIMEOUT_S,
     RATE_LIMIT_PROFILES,
+    RECAP_LENGTH_MAX,
+    RECAP_LENGTH_WARN_THRESHOLD,
 )
 
 GUI_SETTINGS_PATH = os.path.join("config", "gui_settings.json")
@@ -309,6 +312,17 @@ def apply_app_font(app):
         font_family = "Segoe UI Variable"
     app.setFont(QFont(font_family, BASE_FONT_SIZE))
     setFontFamilies([font_family, "Segoe UI Variable", "Segoe UI"])
+
+
+class TogglePasswordLineEdit(PasswordLineEdit):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # Replace press-and-hold with click-to-toggle behavior.
+        self.viewButton.removeEventFilter(self)
+        self.viewButton.clicked.connect(self._toggle_password_visibility)
+
+    def _toggle_password_visibility(self):
+        self.setPasswordVisible(not self.isPasswordVisible())
 
 
 @dataclass
@@ -1344,7 +1358,7 @@ class RunPage(QWidget):
             session_refresh_every=session_refresh_every,
             stop_on_cooldown=self.stop_on_cooldown_switch.isChecked(),
             recap=False,
-            recap_length=500,
+            recap_length=DEFAULT_RECAP_LENGTH,
             recap_output_dir=None,
             recap_sleep_ms=800,
             recap_max_retries=3,
@@ -1599,6 +1613,7 @@ class RecapPage(RunPage):
             settings_key="options_recap",
         )
         self._recap_start_ts = None
+        self._warned_large_page_size = False
 
     def _build_files_card(self):
         card = CardWidget()
@@ -1643,8 +1658,9 @@ class RecapPage(RunPage):
         form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
         self.length_spin = QSpinBox()
-        self.length_spin.setRange(10, 2000)
-        self.length_spin.setValue(500)
+        self.length_spin.setRange(10, RECAP_LENGTH_MAX)
+        self.length_spin.setValue(DEFAULT_RECAP_LENGTH)
+        self.length_spin.valueChanged.connect(self._handle_page_size_change)
 
         self.sleep_spin = QSpinBox()
         self.sleep_spin.setRange(0, 10000)
@@ -1666,6 +1682,12 @@ class RecapPage(RunPage):
         form.addRow(BodyLabel("Backup tiap N batch"), self.backup_spin)
 
         card_layout.addLayout(form)
+        page_size_hint = CaptionLabel(
+            "Page size = jumlah baris per request. Lebih besar lebih cepat, "
+            "tapi lebih berat; server bisa membatasi dan otomatis turun."
+        )
+        page_size_hint.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
+        card_layout.addWidget(page_size_hint)
         status_hint = CaptionLabel("Status filter dikunci: Semua.")
         status_hint.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
         card_layout.addWidget(status_hint)
@@ -1691,6 +1713,25 @@ class RecapPage(RunPage):
         )
 
         return card
+
+    def _handle_page_size_change(self, value):
+        if value > RECAP_LENGTH_WARN_THRESHOLD:
+            if self._warned_large_page_size:
+                return
+            self._warned_large_page_size = True
+            InfoBar.warning(
+                title="Page size besar",
+                content=(
+                    f"Di atas {RECAP_LENGTH_WARN_THRESHOLD} akan dicoba, "
+                    f"tetapi jika server membatasi akan otomatis turun "
+                    f"ke {RECAP_LENGTH_WARN_THRESHOLD}."
+                ),
+                duration=4500,
+                position=InfoBarPosition.TOP_RIGHT,
+                parent=self,
+            )
+        else:
+            self._warned_large_page_size = False
 
     def _browse_output_dir(self):
         start_dir = os.getcwd()
@@ -2081,7 +2122,7 @@ class SsoPage(QWidget):
 
         self.username_input = LineEdit()
         self.username_input.setPlaceholderText("username.sso")
-        self.password_input = PasswordLineEdit()
+        self.password_input = TogglePasswordLineEdit()
         self.password_input.setPlaceholderText("password")
 
         form.addRow(BodyLabel("SSO Username"), self.username_input)

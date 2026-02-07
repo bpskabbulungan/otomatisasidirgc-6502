@@ -6,6 +6,11 @@ import tempfile
 import time
 
 from .logging_utils import log_error, log_info, log_warn
+from .settings import (
+    DEFAULT_RECAP_LENGTH,
+    RECAP_LENGTH_MAX,
+    RECAP_LENGTH_WARN_THRESHOLD,
+)
 
 
 DEFAULT_OUTPUT_DIR = os.path.join("logs", "recap")
@@ -339,7 +344,7 @@ def run_recap(
     monitor,
     *,
     status_filter="semua",
-    length=500,
+    length=DEFAULT_RECAP_LENGTH,
     output_dir=None,
     sleep_ms=800,
     max_retries=3,
@@ -348,8 +353,15 @@ def run_recap(
     progress_callback=None,
 ):
     start_ts_epoch = time.time()
-    if length < 1:
-        length = 100
+
+    def _normalize_length(value, fallback):
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            return fallback
+        return value if value > 0 else fallback
+
+    length = _normalize_length(length, DEFAULT_RECAP_LENGTH)
     try:
         backup_every = int(backup_every)
     except (TypeError, ValueError):
@@ -408,6 +420,21 @@ def run_recap(
                 current_filter=status_filter,
             )
 
+    length = _normalize_length(length, DEFAULT_RECAP_LENGTH)
+    if length > RECAP_LENGTH_MAX:
+        log_warn(
+            "Recap length above max; clamping.",
+            requested=length,
+            max=RECAP_LENGTH_MAX,
+        )
+        length = RECAP_LENGTH_MAX
+    if length > RECAP_LENGTH_WARN_THRESHOLD:
+        log_warn(
+            "Recap page size above recommended; may be capped.",
+            length=length,
+            fallback=RECAP_LENGTH_WARN_THRESHOLD,
+        )
+
     start_ts = checkpoint.get("run_started_at") if checkpoint else _now_readable()
     if not output_path:
         output_path = _build_output_path(output_dir)
@@ -444,9 +471,10 @@ def run_recap(
     batch_index = 0
     while True:
         monitor.mark_activity("recap")
+        requested_length = length
         payload = dict(base_payload)
         payload["start"] = str(current_start)
-        payload["length"] = str(length)
+        payload["length"] = str(requested_length)
 
         attempt = 0
         data = None
@@ -513,19 +541,32 @@ def run_recap(
             )
             break
 
-        if current_start == start_at and data and len(data) < length:
-            if records_filtered and records_filtered > len(data):
-                length = len(data)
-                log_warn(
-                    "Server capped page size; adjusting length.",
-                    new_length=length,
-                )
-                payload["length"] = str(length)
-
         if not data:
             monitor.mark_activity("recap")
             log_info("No more data returned; stopping.", start=current_start)
             break
+
+        actual_count = len(data)
+        next_length = requested_length
+        if (
+            actual_count < requested_length
+            and records_filtered is not None
+            and records_filtered > (current_start + actual_count)
+        ):
+            if requested_length > RECAP_LENGTH_WARN_THRESHOLD:
+                next_length = RECAP_LENGTH_WARN_THRESHOLD
+                log_warn(
+                    "Server capped page size; falling back to safe length.",
+                    requested=requested_length,
+                    observed=actual_count,
+                    next_length=next_length,
+                )
+            else:
+                next_length = actual_count
+                log_warn(
+                    "Server capped page size; adjusting length.",
+                    new_length=next_length,
+                )
 
         captured_at = _now_readable()
         rows = [
@@ -570,6 +611,7 @@ def run_recap(
             except Exception:
                 pass
 
+        length = _normalize_length(next_length, requested_length)
         checkpoint_data = {
             "status": "running",
             "run_started_at": start_ts,
@@ -586,10 +628,10 @@ def run_recap(
         }
         _save_checkpoint(checkpoint_path, checkpoint_data)
 
-        current_start += length
+        current_start += actual_count
         if records_filtered is not None and current_start >= records_filtered:
             break
-        if records_filtered is None and len(data) < length:
+        if records_filtered is None and actual_count < requested_length:
             break
 
         if sleep_ms:
