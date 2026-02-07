@@ -37,6 +37,12 @@ def contains_tokens(haystack, tokens):
     return all(token in haystack for token in tokens)
 
 
+def count_tokens_present(haystack, tokens):
+    if not tokens:
+        return 0
+    return sum(1 for token in tokens if token in haystack)
+
+
 def join_tokens(tokens):
     if not tokens:
         return "-"
@@ -68,6 +74,29 @@ def select_matching_card(page, monitor, idsbr, nama_usaha, alamat):
     nama_tokens = match_tokens(nama_usaha)
     alamat_tokens = match_tokens(alamat)
 
+    def get_card_text(header, card_scope):
+        visible_text = ""
+        full_text = ""
+        try:
+            visible_text = card_scope.inner_text()
+        except Exception:
+            try:
+                visible_text = header.inner_text()
+            except Exception:
+                visible_text = ""
+        try:
+            full_text = card_scope.text_content() or ""
+        except Exception:
+            try:
+                full_text = header.text_content() or ""
+            except Exception:
+                full_text = ""
+        if not full_text:
+            full_text = visible_text
+        if not visible_text:
+            visible_text = full_text
+        return visible_text or "", full_text or ""
+
     candidates = []
     for idx in range(count):
         header = header_locator.nth(idx)
@@ -76,20 +105,16 @@ def select_matching_card(page, monitor, idsbr, nama_usaha, alamat):
         )
         if card_scope.count() == 0:
             card_scope = header
-        try:
-            text = card_scope.inner_text()
-        except Exception:
-            try:
-                text = header.inner_text()
-            except Exception:
-                text = ""
 
-        haystack = normalize_match_text(text)
+        visible_text, full_text = get_card_text(header, card_scope)
+        haystack = normalize_match_text(full_text)
         flags = {
             "idsbr": bool(idsbr_norm and idsbr_norm in haystack),
             "nama": contains_tokens(haystack, nama_tokens),
             "alamat": contains_tokens(haystack, alamat_tokens),
         }
+        nama_hits = count_tokens_present(haystack, nama_tokens)
+        alamat_hits = count_tokens_present(haystack, alamat_tokens)
         score = 0
         if flags["idsbr"]:
             score += 3
@@ -104,7 +129,9 @@ def select_matching_card(page, monitor, idsbr, nama_usaha, alamat):
                 "card": card_scope,
                 "flags": flags,
                 "score": score,
-                "text": text,
+                "text": visible_text,
+                "nama_hits": nama_hits,
+                "alamat_hits": alamat_hits,
             }
         )
 
@@ -123,6 +150,35 @@ def select_matching_card(page, monitor, idsbr, nama_usaha, alamat):
         candidate = candidates[0]
         if is_acceptable(candidate["flags"]):
             log_info("Single result matched.")
+            log_info(
+                summarize_match(
+                    0,
+                    candidate["flags"],
+                    candidate["score"],
+                    candidate["text"],
+                )
+            )
+            return candidate["header"], candidate["card"]
+
+        soft_ok = False
+        if idsbr and candidate["flags"]["idsbr"]:
+            soft_ok = True
+        elif nama_usaha and candidate["nama_hits"] > 0:
+            if alamat:
+                soft_ok = (
+                    candidate["alamat_hits"] > 0
+                    or candidate["flags"]["idsbr"]
+                )
+            else:
+                soft_ok = True
+        elif not nama_usaha and alamat and candidate["alamat_hits"] > 0:
+            soft_ok = True
+        if soft_ok:
+            log_info(
+                "Single result matched (relaxed).",
+                nama_hits=f"{candidate['nama_hits']}/{len(nama_tokens)}",
+                alamat_hits=f"{candidate['alamat_hits']}/{len(alamat_tokens)}",
+            )
             log_info(
                 summarize_match(
                     0,

@@ -1,3 +1,4 @@
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -5,6 +6,29 @@ from pathlib import Path
 
 LOGS_DIR = "logs"
 DEFAULT_LOG_TYPE = "run"
+COLUMNS = [
+    "no",
+    "idsbr",
+    "nama_usaha",
+    "alamat",
+    "keberadaanusaha_gc",
+    "latitude",
+    "latitude_source",
+    "latitude_before",
+    "latitude_after",
+    "longitude",
+    "longitude_source",
+    "longitude_before",
+    "longitude_after",
+    "hasil_gc_before",
+    "hasil_gc_after",
+    "nama_usaha_before",
+    "nama_usaha_after",
+    "alamat_before",
+    "alamat_after",
+    "status",
+    "catatan",
+]
 
 
 def _next_run_number(date_dir, prefix):
@@ -38,37 +62,13 @@ def build_run_log_path(*, now=None, log_type=None):
 
 
 def write_run_log(rows, output_path):
-    columns = [
-        "no",
-        "idsbr",
-        "nama_usaha",
-        "alamat",
-        "keberadaanusaha_gc",
-        "latitude",
-        "latitude_source",
-        "latitude_before",
-        "latitude_after",
-        "longitude",
-        "longitude_source",
-        "longitude_before",
-        "longitude_after",
-        "hasil_gc_before",
-        "hasil_gc_after",
-        "nama_usaha_before",
-        "nama_usaha_after",
-        "alamat_before",
-        "alamat_after",
-        "status",
-        "catatan",
-    ]
-
     try:
         import pandas as pd
     except ImportError:
         pd = None
 
     if pd:
-        df = pd.DataFrame(rows, columns=columns)
+        df = pd.DataFrame(rows, columns=COLUMNS)
         df.to_excel(output_path, index=False)
         return
 
@@ -81,8 +81,42 @@ def write_run_log(rows, output_path):
 
     workbook = openpyxl.Workbook()
     sheet = workbook.active
-    sheet.append(columns)
+    sheet.append(COLUMNS)
     for row in rows:
-        sheet.append([row.get(col, "") for col in columns])
+        sheet.append([row.get(col, "") for col in COLUMNS])
+    workbook.save(output_path)
+    workbook.close()
+
+
+def append_run_log_rows(rows, output_path):
+    if not rows:
+        return
+    try:
+        import openpyxl
+    except ImportError as exc:
+        raise RuntimeError(
+            "Install openpyxl to append log Excel."
+        ) from exc
+
+    if not output_path:
+        raise ValueError("output_path is required.")
+
+    output_path = str(output_path)
+    dir_name = os.path.dirname(output_path)
+    if dir_name:
+        os.makedirs(dir_name, exist_ok=True)
+
+    if os.path.exists(output_path):
+        workbook = openpyxl.load_workbook(output_path)
+        sheet = workbook.active
+        if sheet.max_row == 1 and sheet.cell(1, 1).value is None:
+            sheet.append(COLUMNS)
+    else:
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        sheet.append(COLUMNS)
+
+    for row in rows:
+        sheet.append([row.get(col, "") for col in COLUMNS])
     workbook.save(output_path)
     workbook.close()

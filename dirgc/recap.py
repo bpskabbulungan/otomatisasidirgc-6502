@@ -230,6 +230,7 @@ def _safe_save_workbook(workbook, xlsx_path):
             pass
     try:
         os.replace(tmp_path, xlsx_path)
+        return
     except Exception as exc:
         fallback_path = f"{xlsx_path}.new"
         try:
@@ -239,6 +240,7 @@ def _safe_save_workbook(workbook, xlsx_path):
                 path=fallback_path,
                 error=str(exc),
             )
+            return
         except Exception:
             if tmp_path and os.path.exists(tmp_path):
                 try:

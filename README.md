@@ -36,13 +36,13 @@ Namun, sebaiknya baca dokumentasi ini dulu agar alur kerjanya lebih jelas.
 |  |- logging_utils.py    # Logger konsol + formatter (juga untuk GUI via handler)
 |  |- matching.py         # Pencocokan usaha dari hasil filter (token match + scoring)
 |  |- processor.py        # Proses utama per baris Excel: filter, pilih usaha, isi form, submit, log
-|  |- run_logs.py         # Generate path & tulis file log Excel (logs/YYYYMMDD/runN_HHMM.xlsx)
+|  |- run_logs.py         # Generate path & tulis file log Excel (logs/run/YYYYMMDD/runN_HHMM.xlsx)
 |  |- settings.py         # Konstanta & default config (URL, timeout, file default, dsb)
 |  `- gui/                # GUI (PyQt5 + QFluentWidgets)
 |     `- app.py           # Seluruh UI: halaman Run/Update/SSO/Settings + worker thread
 |- config/                # Konfigurasi lokal (contoh: credentials)
 |- data/                  # File input (Excel)
-|- logs/                  # Output log per run (Excel)
+|- logs/                  # Output log per run/update (Excel)
 |- run_dirgc.py           # Entry point CLI (wrapper -> dirgc.cli.main)
 |- run_dirgc_gui.py       # Entry point GUI (wrapper -> dirgc.gui.app.main)
 |- requirements.txt
@@ -209,7 +209,7 @@ Perintah di atas hanya memproses baris 1 sampai 5 (1-based, inklusif).
 - `--idle-timeout-ms` untuk batas idle (default 1800000 / 30 menit).
 - Rekap via `--recap` menghasilkan Excel dengan 3 sheet: `Sudah GC`, `Belum GC`, `Duplikat`.
 - `--recap-backup-every` untuk mengatur backup `.bak` setiap N batch (default: 10, gunakan 0 untuk mematikan).
-- `--web-timeout-s` untuk toleransi loading web (default 30 detik).
+- `--web-timeout-s` untuk toleransi loading web (default 300 detik).
 - `--manual-only` untuk selalu login manual (tanpa auto-fill kredensial).
 - `--dirgc-only` untuk berhenti di halaman DIRGC (tanpa filter/input).
 - `--edit-nama-alamat` untuk mengaktifkan toggle edit Nama/Alamat Usaha dan isi dari Excel.
@@ -249,7 +249,8 @@ Untuk GUI, isi kredensial lewat menu `Akun SSO` (tidak disimpan ke file).
 
 ## Output Log Excel
 
-Setiap run akan menghasilkan file log Excel di folder `logs/YYYYMMDD/`.
+Setiap run akan menghasilkan file log Excel di folder `logs/run/YYYYMMDD/`.
+Untuk mode update, log berada di `logs/update/YYYYMMDD/`.
 Nama file mengikuti pola `run{N}_{HHMM}.xlsx` (contoh: `run1_0930.xlsx`).
 
 Untuk **rekap** (`--recap` / menu Recap), file output ada di `logs/recap/YYYYMMDD/`
@@ -258,7 +259,7 @@ dengan nama `rekap{N}_{HHMMSS}.xlsx`. Penyimpanan rekap dibuat aman per batch:
 - Sebelum menulis, file lama dibackup menjadi `.bak`.
 - File baru ditulis ke file sementara, lalu di-`replace` secara atomik.
 - Jika file sedang terkunci (mis. dibuka di Excel), bisa muncul file `.new`.
-  Tutup Excel, lalu rename `.new` menjadi `.xlsx`.
+  Tutup Excel, lalu rename `.new` menjadi `.xlsx`. Proses rekap tetap berjalan.
 
 Jika terjadi error di batch tengah, batch sebelumnya tetap aman di file utama
 atau backup `.bak`.

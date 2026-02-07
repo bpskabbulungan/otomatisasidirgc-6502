@@ -19,7 +19,7 @@ from .excel import load_excel_rows
 from .logging_utils import log_error, log_info, log_warn
 from .matching import select_matching_card
 from .resume_state import save_resume_state
-from .run_logs import build_run_log_path, write_run_log
+from .run_logs import build_run_log_path, write_run_log, append_run_log_rows
 from .settings import RUN_LOG_CHECKPOINT_EVERY, TARGET_URL
 
 
@@ -231,6 +231,14 @@ def _parse_coord_value(value, min_value, max_value):
     return number
 
 
+def _is_indonesia_coord(lat_value, lon_value):
+    lat = _parse_coord_value(lat_value, -90, 90)
+    lon = _parse_coord_value(lon_value, -180, 180)
+    if lat is None or lon is None:
+        return False
+    return -11.5 <= lat <= 6.5 and 95 <= lon <= 141.5
+
+
 def _extract_cooldown_seconds(body_text, headers):
     seconds = 0
     reason = ""
@@ -320,6 +328,23 @@ def _extract_gc_token(page):
             return str(value)
     except Exception:
         pass
+    for selector in (
+        "input[name='gc_token']",
+        "input#gc_token",
+        "input[name*='gc_token']",
+        "input[id*='gc_token']",
+    ):
+        try:
+            locator = page.locator(selector)
+            if locator.count() > 0:
+                value = locator.first.get_attribute("value")
+                if value:
+                    return str(value)
+                value = locator.first.input_value()
+                if value:
+                    return str(value)
+        except Exception:
+            continue
     try:
         content = page.content()
     except Exception:
@@ -368,6 +393,7 @@ def _build_request_payload(
     nama_value,
     update_alamat,
     alamat_value,
+    perusahaan_id_override=None,
     gc_token_override=None,
 ):
     payload = _collect_form_payload(page)
@@ -378,6 +404,10 @@ def _build_request_payload(
         _set_payload_value(payload, "latitude", latitude_value)
     if update_lon and longitude_value is not None:
         _set_payload_value(payload, "longitude", longitude_value)
+    if not update_lat:
+        payload.pop("latitude", None)
+    if not update_lon:
+        payload.pop("longitude", None)
 
     if update_nama:
         if "edit_nama" not in payload:
@@ -399,7 +429,9 @@ def _build_request_payload(
         payload["gc_token"] = gc_token
 
     if not payload.get("perusahaan_id"):
-        perusahaan_id = _extract_perusahaan_id(page)
+        perusahaan_id = (
+            perusahaan_id_override or _extract_perusahaan_id(page)
+        )
         if perusahaan_id:
             payload["perusahaan_id"] = perusahaan_id
 
@@ -597,7 +629,7 @@ def process_excel_rows(
     idle_reason = None
     cooldown_reason = None
     checkpoint_every = int(RUN_LOG_CHECKPOINT_EVERY or 0)
-    last_checkpoint = 0
+    appended_rows = 0
     session_submit_count = 0
     session_refresh_pending = False
     request_gc_token = None
@@ -610,7 +642,7 @@ def process_excel_rows(
         session_refresh_every = 0
 
     def checkpoint_run_log(force=False):
-        nonlocal last_checkpoint
+        nonlocal appended_rows
         if not run_log_rows:
             return
         if checkpoint_every <= 0 and not force:
@@ -618,15 +650,16 @@ def process_excel_rows(
         if (
             checkpoint_every > 0
             and not force
-            and len(run_log_rows) - last_checkpoint < checkpoint_every
+            and len(run_log_rows) < checkpoint_every
         ):
             return
-        write_run_log(run_log_rows, run_log_path)
-        last_checkpoint = len(run_log_rows)
+        append_run_log_rows(run_log_rows, run_log_path)
+        appended_rows += len(run_log_rows)
+        run_log_rows.clear()
         if not force:
             log_info(
                 "Run log checkpoint saved.",
-                rows=last_checkpoint,
+                rows=appended_rows,
                 path=str(run_log_path),
             )
 
@@ -707,9 +740,53 @@ def process_excel_rows(
             row_excel=excel_row,
             idsbr=idsbr or "-",
         )
+        update_field_labels = []
+        if update_hasil_gc:
+            update_field_labels.append("hasil_gc")
+        if update_nama:
+            update_field_labels.append("nama_usaha")
+        if update_alamat:
+            update_field_labels.append("alamat")
+        if update_lat or update_lon:
+            if update_lat and update_lon:
+                update_field_labels.append("koordinat")
+            else:
+                if update_lat:
+                    update_field_labels.append("latitude")
+                if update_lon:
+                    update_field_labels.append("longitude")
+        update_fields_label = ", ".join(update_field_labels) or "-"
+        log_info(
+            "Update fields.",
+            idsbr=idsbr or "-",
+            fields=update_fields_label,
+        )
+
+        def build_success_note(server_message):
+            if update_mode or edit_nama_alamat:
+                return f"Update sukses: {update_fields_label}."
+            message = (server_message or "").strip()
+            return message or "Submit sukses"
 
         try:
             monitor.idle_check()
+            if update_lat or update_lon:
+                lat_text = (latitude or "").strip()
+                lon_text = (longitude or "").strip()
+                if (
+                    lat_text
+                    and lon_text
+                    and not _is_indonesia_coord(lat_text, lon_text)
+                ):
+                    log_warn(
+                        "Koordinat Excel invalid; lewati baris.",
+                        idsbr=idsbr or "-",
+                        latitude=lat_text,
+                        longitude=lon_text,
+                    )
+                    status = "error"
+                    note = "Koordinat Excel invalid; baris dilewati."
+                    continue
             did_refresh = False
             if session_refresh_pending or (
                 session_refresh_every and session_submit_count >= session_refresh_every
@@ -863,34 +940,101 @@ def process_excel_rows(
                 continue
 
             header_locator, card_scope = selection
+            if card_scope.count() == 0:
+                card_scope = page.locator("body")
+            card_data_id = ""
+            try:
+                card_data_id = card_scope.get_attribute("data-id") or ""
+            except Exception:
+                card_data_id = ""
+            if not card_data_id:
+                try:
+                    card_data_id = (
+                        header_locator.get_attribute("data-id") or ""
+                    )
+                except Exception:
+                    card_data_id = ""
+            if not card_data_id:
+                try:
+                    candidate = pick_visible(
+                        card_scope.locator(
+                            "[data-id].btn-gc-edit, [data-id].btn-tandai, [data-id].btn-detail-link, [data-id].btn-gc-map, [data-id]"
+                        )
+                    )
+                    if candidate is not None:
+                        card_data_id = candidate.get_attribute("data-id") or ""
+                except Exception:
+                    card_data_id = ""
+
+            def is_card_expanded():
+                try:
+                    classes = (card_scope.get_attribute("class") or "")
+                    if "expanded" in classes.split():
+                        return True
+                except Exception:
+                    pass
+                try:
+                    details = card_scope.locator(".usaha-card-details")
+                    if details.count() > 0 and details.first.is_visible():
+                        return True
+                except Exception:
+                    pass
+                return False
+
+            def pick_visible(locator, max_checks=6):
+                try:
+                    total = locator.count()
+                except Exception:
+                    return None
+                for idx in range(min(total, max_checks)):
+                    try:
+                        current = locator.nth(idx)
+                        if current.is_visible():
+                            return current
+                    except Exception:
+                        continue
+                return None
+
+            def locate_visible(selector, scope=None):
+                if scope is not None:
+                    found = pick_visible(scope.locator(selector))
+                    if found is not None:
+                        return found
+                return pick_visible(page.locator(selector))
+
             try:
                 header_locator.scroll_into_view_if_needed()
             except Exception:
                 pass
-            try:
-                monitor.bot_click(header_locator)
-            except Exception as exc:
-                if _is_swal_overlay_visible(page):
-                    dismissed = dismiss_swal_overlays(
-                        page, monitor, context="select card retry", timeout_s=8
-                    )
-                    if dismissed:
-                        monitor.bot_click(header_locator)
+            if not is_card_expanded():
+                try:
+                    monitor.bot_click(header_locator)
+                except Exception as exc:
+                    if _is_swal_overlay_visible(page):
+                        dismissed = dismiss_swal_overlays(
+                            page,
+                            monitor,
+                            context="select card retry",
+                            timeout_s=8,
+                        )
+                        if dismissed:
+                            monitor.bot_click(header_locator)
+                        else:
+                            raise
+                    elif _is_bootstrap_modal_visible(page):
+                        dismissed = dismiss_bootstrap_modals(
+                            page,
+                            monitor,
+                            context="select card retry",
+                            timeout_s=8,
+                        )
+                        if dismissed:
+                            monitor.bot_click(header_locator)
+                        else:
+                            raise
                     else:
                         raise
-                elif _is_bootstrap_modal_visible(page):
-                    dismissed = dismiss_bootstrap_modals(
-                        page, monitor, context="select card retry", timeout_s=8
-                    )
-                    if dismissed:
-                        monitor.bot_click(header_locator)
-                    else:
-                        raise
-                else:
-                    raise
-
-            if card_scope.count() == 0:
-                card_scope = page
+                monitor.wait_for_condition(is_card_expanded, timeout_s=6)
 
             if not update_mode:
                 if (
@@ -916,8 +1060,11 @@ def process_excel_rows(
 
             action_selector = ".btn-gc-edit" if update_mode else ".btn-tandai"
             action_label = "Edit Hasil" if update_mode else "Tandai"
-            action_locator = page.locator(action_selector)
+            action_locator = card_scope.locator(action_selector)
             if action_locator.count() == 0:
+                action_locator = page.locator(action_selector)
+            action_button = pick_visible(action_locator)
+            if action_button is None:
                 missing_note = (
                     "Tombol Edit Hasil tidak ditemukan (kemungkinan belum GC; gunakan menu Run)."
                     if update_mode
@@ -931,23 +1078,14 @@ def process_excel_rows(
                 status = "gagal"
                 note = missing_note
                 continue
-            if not action_locator.first.is_visible():
-                log_warn(
-                    f"Tombol {action_label} tidak terlihat; skipping.",
-                    idsbr=idsbr or "-",
-                )
-                stats["skipped_no_tandai"] += 1
-                status = "gagal"
-                note = f"Tombol {action_label} tidak terlihat"
-                continue
 
             wait_for_block_ui_clear(page, monitor, timeout_s=15)
             try:
-                action_locator.first.scroll_into_view_if_needed()
+                action_button.scroll_into_view_if_needed()
             except Exception:
                 pass
             try:
-                monitor.bot_click(action_locator.first)
+                monitor.bot_click(action_button)
             except Exception as exc:
                 log_warn(
                     f"Tombol {action_label} gagal diklik; skipping.",
@@ -959,7 +1097,7 @@ def process_excel_rows(
                 note = f"Tombol {action_label} gagal diklik"
                 continue
             form_ready = monitor.wait_for_condition(
-                lambda: page.locator("#tt_hasil_gc").count() > 0,
+                lambda: locate_visible("#tt_hasil_gc") is not None,
                 timeout_s=30,
             )
             if not form_ready:
@@ -972,10 +1110,18 @@ def process_excel_rows(
                 note = "Form Hasil GC tidak muncul"
                 continue
 
+            form_scope = page
+            modal_visible = pick_visible(page.locator(".modal.show"))
+            if modal_visible is not None:
+                form_scope = modal_visible
+
             if update_hasil_gc:
-                select_locator = page.locator("#tt_hasil_gc")
+                select_locator = (
+                    locate_visible("#tt_hasil_gc", form_scope)
+                    or page.locator("#tt_hasil_gc").first
+                )
                 try:
-                    hasil_gc_before = select_locator.first.input_value() or ""
+                    hasil_gc_before = select_locator.input_value() or ""
                 except Exception:
                     hasil_gc_before = ""
                 if hasil_gc_select(page, monitor, hasil_gc):
@@ -994,16 +1140,21 @@ def process_excel_rows(
                     status = "gagal"
                     note = "Hasil GC tidak valid/kosong"
             else:
-                select_locator = page.locator("#tt_hasil_gc")
+                select_locator = (
+                    locate_visible("#tt_hasil_gc", form_scope)
+                    or page.locator("#tt_hasil_gc").first
+                )
                 try:
-                    hasil_gc_before = select_locator.first.input_value() or ""
+                    hasil_gc_before = select_locator.input_value() or ""
                 except Exception:
                     hasil_gc_before = ""
                 hasil_gc_after = hasil_gc_before
 
-            def safe_fill(selector, value, field_name, allow_overwrite):
-                locator = page.locator(selector)
-                if locator.count() == 0 or not locator.first.is_visible():
+            def safe_fill(
+                selector, value, field_name, allow_overwrite, scope=None
+            ):
+                locator = locate_visible(selector, scope)
+                if locator is None:
                     log_warn(
                         "Field tidak ditemukan; lewati.",
                         idsbr=idsbr or "-",
@@ -1011,7 +1162,7 @@ def process_excel_rows(
                     )
                     return "", "missing", "", ""
                 try:
-                    current_value = locator.first.input_value()
+                    current_value = locator.input_value()
                 except Exception:
                     current_value = ""
                 current_value = _normalize_coord_text(current_value)
@@ -1020,7 +1171,8 @@ def process_excel_rows(
                 if allow_overwrite:
                     if desired_value:
                         if current_value != desired_value:
-                            monitor.bot_fill(selector, desired_value)
+                            monitor.mark_activity("bot")
+                            locator.fill(desired_value)
                         return desired_value, "excel", current_value, desired_value
                     if current_value:
                         return current_value, "web", current_value, current_value
@@ -1030,7 +1182,8 @@ def process_excel_rows(
                     return current_value, "web", current_value, current_value
                 if not desired_value:
                     return "", "empty", current_value, ""
-                monitor.bot_fill(selector, desired_value)
+                monitor.mark_activity("bot")
+                locator.fill(desired_value)
                 return desired_value, "excel", current_value, desired_value
 
             lat_value = latitude if update_lat else None
@@ -1043,6 +1196,7 @@ def process_excel_rows(
                     lat_value,
                     "latitude",
                     allow_overwrite_lat,
+                    form_scope,
                 )
             )
             longitude_value, longitude_source, longitude_before, longitude_after = (
@@ -1051,13 +1205,16 @@ def process_excel_rows(
                     lon_value,
                     "longitude",
                     allow_overwrite_lon,
+                    form_scope,
                 )
             )
 
-            def ensure_edit_field(toggle_selector, input_selector, value, field_name):
+            def ensure_edit_field(
+                toggle_selector, input_selector, value, field_name, scope=None
+            ):
                 desired_value = str(value).strip() if value else ""
-                toggle = page.locator(toggle_selector)
-                if toggle.count() == 0 or not toggle.first.is_visible():
+                toggle = locate_visible(toggle_selector, scope)
+                if toggle is None:
                     log_warn(
                         "Toggle edit tidak ditemukan; lewati.",
                         idsbr=idsbr or "-",
@@ -1065,12 +1222,12 @@ def process_excel_rows(
                     )
                     return "", ""
                 try:
-                    toggle_checked = toggle.first.is_checked()
+                    toggle_checked = toggle.is_checked()
                 except Exception:
                     toggle_checked = False
                 if not toggle_checked:
                     try:
-                        monitor.bot_click(toggle.first)
+                        monitor.bot_click(toggle)
                     except Exception as exc:
                         log_warn(
                             "Toggle edit gagal diklik; lewati.",
@@ -1080,11 +1237,8 @@ def process_excel_rows(
                         )
                         return "", ""
 
-                input_locator = page.locator(input_selector)
-                if (
-                    input_locator.count() == 0
-                    or not input_locator.first.is_visible()
-                ):
+                input_locator = locate_visible(input_selector, scope)
+                if input_locator is None:
                     log_warn(
                         "Field edit tidak ditemukan; lewati.",
                         idsbr=idsbr or "-",
@@ -1092,8 +1246,7 @@ def process_excel_rows(
                     )
                     return "", ""
                 if not monitor.wait_for_condition(
-                    lambda: input_locator.count() > 0
-                    and input_locator.first.is_editable(),
+                    lambda: input_locator.is_editable(),
                     timeout_s=5,
                 ):
                     log_warn(
@@ -1103,7 +1256,7 @@ def process_excel_rows(
                     )
                     return "", ""
                 try:
-                    current_value = input_locator.first.input_value()
+                    current_value = input_locator.input_value()
                 except Exception:
                     current_value = ""
                 current_value = (current_value or "").strip()
@@ -1111,7 +1264,8 @@ def process_excel_rows(
                     return current_value, current_value
                 if current_value == desired_value:
                     return current_value, desired_value
-                monitor.bot_fill(input_selector, desired_value)
+                monitor.mark_activity("bot")
+                input_locator.fill(desired_value)
                 return current_value, desired_value
 
             if update_mode:
@@ -1121,6 +1275,7 @@ def process_excel_rows(
                         "#tt_nama_usaha_gc",
                         nama_usaha,
                         "nama_usaha",
+                        form_scope,
                     )
                 if update_alamat:
                     alamat_before, alamat_after = ensure_edit_field(
@@ -1128,6 +1283,7 @@ def process_excel_rows(
                         "#tt_alamat_usaha_gc",
                         alamat,
                         "alamat",
+                        form_scope,
                     )
             elif edit_nama_alamat:
                 ensure_edit_field(
@@ -1135,35 +1291,48 @@ def process_excel_rows(
                     "#tt_nama_usaha_gc",
                     nama_usaha,
                     "nama_usaha",
+                    form_scope,
                 )
                 ensure_edit_field(
                     "#toggle_edit_alamat",
                     "#tt_alamat_usaha_gc",
                     alamat,
                     "alamat",
+                    form_scope,
                 )
+
+            if (
+                (latitude_value or longitude_value)
+                and not _is_indonesia_coord(latitude_value, longitude_value)
+                and not (update_lat or update_lon)
+            ):
+                log_warn(
+                    "Koordinat existing invalid; lewati baris.",
+                    idsbr=idsbr or "-",
+                    latitude=latitude_value or "-",
+                    longitude=longitude_value or "-",
+                )
+                status = "error"
+                note = "Koordinat existing invalid; baris dilewati."
+                monitor.bot_goto(TARGET_URL)
+                continue
 
             if status == "gagal" and note == "Hasil GC tidak valid/kosong":
                 monitor.bot_goto(TARGET_URL)
                 continue
 
-            submit_locator = page.locator("#save-tandai-usaha-btn")
-            if submit_locator.count() == 0:
+            submit_locator = locate_visible(
+                "#save-tandai-usaha-btn", form_scope
+            )
+            if submit_locator is None:
+                submit_locator = locate_visible("#save-tandai-usaha-btn")
+            if submit_locator is None:
                 log_warn(
                     "Tombol submit tidak ditemukan; skipping.",
                     idsbr=idsbr or "-",
                 )
                 status = "gagal"
                 note = "Tombol submit tidak ditemukan"
-                monitor.bot_goto(TARGET_URL)
-                continue
-            if not submit_locator.first.is_visible():
-                log_warn(
-                    "Tombol submit tidak terlihat; skipping.",
-                    idsbr=idsbr or "-",
-                )
-                status = "gagal"
-                note = "Tombol submit tidak terlihat"
                 monitor.bot_goto(TARGET_URL)
                 continue
 
@@ -1206,7 +1375,7 @@ def process_excel_rows(
             SUBMIT_RATE_LIMITER.wait_for_slot(monitor)
             wait_for_block_ui_clear(page, monitor, timeout_s=15)
             try:
-                submit_locator.first.scroll_into_view_if_needed()
+                submit_locator.scroll_into_view_if_needed()
             except Exception:
                 pass
             if submit_mode == "request":
@@ -1222,6 +1391,7 @@ def process_excel_rows(
                     nama_value=nama_after or nama_usaha,
                     update_alamat=update_alamat or edit_nama_alamat,
                     alamat_value=alamat_after or alamat,
+                    perusahaan_id_override=card_data_id or None,
                     gc_token_override=request_gc_token,
                 )
                 if gc_token_value:
@@ -1235,13 +1405,22 @@ def process_excel_rows(
                 if not request_payload.get("gc_token"):
                     missing_fields.append("gc_token")
 
+                ready_for_request = True
                 if missing_fields:
-                    log_warn(
-                        "Submit via request tidak siap; fallback ke UI.",
-                        idsbr=idsbr or "-",
-                        missing=", ".join(missing_fields),
-                    )
-                else:
+                    if missing_fields == ["gc_token"]:
+                        log_warn(
+                            "GC token belum terdeteksi; coba submit request tanpa gc_token.",
+                            idsbr=idsbr or "-",
+                        )
+                        ready_for_request = True
+                    else:
+                        log_warn(
+                            "Submit via request tidak siap; fallback ke UI.",
+                            idsbr=idsbr or "-",
+                            missing=", ".join(missing_fields),
+                        )
+                        ready_for_request = False
+                if ready_for_request:
                     post_headers = {
                         "origin": "https://matchapro.web.bps.go.id",
                         "referer": TARGET_URL,
@@ -1289,7 +1468,7 @@ def process_excel_rows(
                                 timeout_s=SUBMIT_POST_SUCCESS_DELAY_S,
                             )
                         status = "berhasil"
-                        note = result.get("message") or "Submit sukses (request)."
+                        note = build_success_note(result.get("message"))
                         session_submit_count += 1
                         monitor.bot_goto(TARGET_URL)
                         continue
@@ -1299,7 +1478,7 @@ def process_excel_rows(
                     monitor.bot_goto(TARGET_URL)
                     continue
             try:
-                monitor.bot_click(submit_locator.first)
+                monitor.bot_click(submit_locator)
             except Exception as exc:
                 log_warn(
                     "Tombol submit gagal diklik; skipping.",
@@ -1495,7 +1674,7 @@ def process_excel_rows(
                     lambda: False, timeout_s=SUBMIT_POST_SUCCESS_DELAY_S
                 )
             status = "berhasil"
-            note = "Submit sukses"
+            note = build_success_note("")
             session_submit_count += 1
         except Exception as exc:
             message = str(exc)

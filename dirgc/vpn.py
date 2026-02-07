@@ -41,7 +41,9 @@ def _get_ipv4_from_ipconfig():
         )
     except Exception:
         return []
-    matches = re.findall(r"IPv4 Address[^:]*:\s*([0-9.]+)", output)
+    matches = re.findall(
+        r"(?:IPv4 Address|Alamat IPv4)[^:]*:\s*([0-9.]+)", output
+    )
     return [match.strip() for match in matches if match.strip()]
 
 
@@ -76,4 +78,3 @@ def ensure_vpn_connected(prefixes=None):
     raise RuntimeError(
         "VPN tidak terdeteksi. Aktifkan VPN lalu jalankan ulang."
     )
-

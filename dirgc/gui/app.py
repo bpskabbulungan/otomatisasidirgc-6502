@@ -592,7 +592,6 @@ class RunPage(QWidget):
         )
         card_layout.addWidget(coords_row)
         coords_row.setVisible(self._show_prefer_web_coords)
-
         if self._update_mode_default:
             card_layout.addWidget(SubtitleLabel("Field update"))
 
