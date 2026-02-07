@@ -1,3 +1,4 @@
+import random
 import re
 import time
 
@@ -6,9 +7,11 @@ from .logging_utils import log_info, log_warn
 from .settings import (
     AUTO_LOGIN_RESULT_TIMEOUT_S,
     BLOCK_UI_SELECTOR,
+    DEFAULT_RATE_LIMIT_PROFILE,
     HASIL_GC_LABELS,
     LOGIN_PATH,
     MATCHAPRO_HOST,
+    RATE_LIMIT_PROFILES,
     SSO_HOST,
     TARGET_URL,
 )
@@ -36,9 +39,20 @@ class ActivityMonitor:
     def idle_check(self):
         self._check_stop()
         if time.monotonic() - self.last_activity > self.idle_timeout_s:
-            raise RuntimeError(
-                "Idle timeout reached (5 minutes without activity)."
-            )
+            total_seconds = int(round(self.idle_timeout_s))
+            minutes = total_seconds // 60
+            seconds = total_seconds % 60
+            if minutes >= 1:
+                message = (
+                    "Idle timeout reached "
+                    f"({minutes} minutes {seconds} seconds without activity)."
+                )
+            else:
+                message = (
+                    "Idle timeout reached "
+                    f"({total_seconds} seconds without activity)."
+                )
+            raise RuntimeError(message)
 
     def scale_timeout(self, timeout_s):
         if timeout_s is None:
@@ -77,7 +91,207 @@ class ActivityMonitor:
     def bot_goto(self, url):
         self._check_stop()
         self.mark_activity("bot")
-        self.page.goto(url, wait_until="commit")
+        self.page.goto(url, wait_until="domcontentloaded")
+
+
+class RequestRateLimiter:
+    """
+    Simple rate limiter to throttle automated filter submissions.
+
+    DIRGC mulai memunculkan HTTP 429 jika filter ditembak terlalu cepat.
+    Kelas ini menjaga jarak antar request dan menambahkan exponential backoff
+    ketika server sudah menolak permintaan.
+    """
+
+    def __init__(
+        self,
+        min_interval_s=1.2,
+        penalty_initial_s=5,
+        penalty_max_s=40,
+        jitter_s=0.0,
+        cooldown_after=0,
+        cooldown_s=0.0,
+    ):
+        self.min_interval_s = max(0.1, float(min_interval_s))
+        self.penalty_initial_s = max(0.0, float(penalty_initial_s))
+        self.penalty_max_s = max(self.penalty_initial_s, float(penalty_max_s))
+        self.jitter_s = max(0.0, float(jitter_s))
+        self.cooldown_after = max(0, int(cooldown_after or 0))
+        self.cooldown_s = max(0.0, float(cooldown_s))
+        self._last_request_ts = 0.0
+        self._pending_penalty_s = 0.0
+        self._last_penalty_s = 0.0
+        self._consecutive_rate_limits = 0
+
+    def wait_for_slot(self, monitor):
+        wait_seconds = 0.0
+        if self._pending_penalty_s > 0:
+            wait_seconds = self._pending_penalty_s
+            self._pending_penalty_s = 0.0
+        now = time.monotonic()
+        if self._last_request_ts > 0:
+            elapsed = now - self._last_request_ts
+            if elapsed < self.min_interval_s:
+                wait_seconds = max(wait_seconds, self.min_interval_s - elapsed)
+        if self.jitter_s > 0:
+            wait_seconds += random.uniform(0.0, self.jitter_s)
+        if wait_seconds > 0:
+            monitor.wait_for_condition(lambda: False, timeout_s=wait_seconds)
+        self._last_request_ts = time.monotonic()
+
+    def penalize(self):
+        self._consecutive_rate_limits += 1
+        if self._last_penalty_s <= 0:
+            next_penalty = self.penalty_initial_s
+        else:
+            next_penalty = min(self._last_penalty_s * 2, self.penalty_max_s)
+        self._pending_penalty_s = max(self._pending_penalty_s, next_penalty)
+        self._last_penalty_s = next_penalty
+        extra_cooldown = 0.0
+        if self.cooldown_after and self._consecutive_rate_limits >= self.cooldown_after:
+            extra_cooldown = self.cooldown_s
+            if extra_cooldown > 0:
+                self._pending_penalty_s = max(
+                    self._pending_penalty_s, next_penalty + extra_cooldown
+                )
+        return next_penalty + extra_cooldown
+
+    def reset_penalty(self):
+        self._last_penalty_s = 0.0
+        self._consecutive_rate_limits = 0
+
+    def configure(
+        self,
+        *,
+        min_interval_s=None,
+        penalty_initial_s=None,
+        penalty_max_s=None,
+        jitter_s=None,
+        cooldown_after=None,
+        cooldown_s=None,
+    ):
+        if min_interval_s is not None:
+            self.min_interval_s = max(0.1, float(min_interval_s))
+        if penalty_initial_s is not None:
+            self.penalty_initial_s = max(0.0, float(penalty_initial_s))
+        if penalty_max_s is not None:
+            self.penalty_max_s = max(
+                self.penalty_initial_s, float(penalty_max_s)
+            )
+        if jitter_s is not None:
+            self.jitter_s = max(0.0, float(jitter_s))
+        if cooldown_after is not None:
+            self.cooldown_after = max(0, int(cooldown_after or 0))
+        if cooldown_s is not None:
+            self.cooldown_s = max(0.0, float(cooldown_s))
+        self.reset_penalty()
+
+
+SERVER_COOLDOWN_UNTIL = 0.0
+SERVER_COOLDOWN_REASON = ""
+
+
+def set_server_cooldown(seconds, reason=""):
+    global SERVER_COOLDOWN_UNTIL, SERVER_COOLDOWN_REASON
+    try:
+        seconds = float(seconds)
+    except (TypeError, ValueError):
+        return False
+    if seconds <= 0:
+        return False
+    now = time.monotonic()
+    until = now + seconds
+    if until <= SERVER_COOLDOWN_UNTIL:
+        return False
+    SERVER_COOLDOWN_UNTIL = until
+    SERVER_COOLDOWN_REASON = reason or ""
+    log_warn(
+        "Server cooldown set.",
+        wait_s=round(seconds, 1),
+        reason=SERVER_COOLDOWN_REASON or "-",
+    )
+    return True
+
+
+def get_server_cooldown_remaining():
+    remaining = SERVER_COOLDOWN_UNTIL - time.monotonic()
+    if remaining <= 0:
+        return 0.0, ""
+    return remaining, SERVER_COOLDOWN_REASON
+
+
+def wait_with_keepalive(
+    monitor, total_s, step_s=30, log_interval_s=60, log_context=""
+):
+    try:
+        remaining = float(total_s)
+    except (TypeError, ValueError):
+        return
+    if remaining <= 0:
+        return
+    step_s = max(1.0, float(step_s))
+    log_interval_s = (
+        max(10.0, float(log_interval_s)) if log_interval_s else 0.0
+    )
+    next_log = time.monotonic()
+    while remaining > 0:
+        now = time.monotonic()
+        if log_interval_s and now >= next_log:
+            seconds_left = max(0, int(round(remaining)))
+            minutes = seconds_left // 60
+            seconds = seconds_left % 60
+            log_warn(
+                "Cooldown aktif; menunggu sebelum lanjut.",
+                sisa=f"{minutes:02d}:{seconds:02d}",
+                context=log_context or "-",
+            )
+            next_log = now + log_interval_s
+        monitor.mark_activity("cooldown")
+        chunk = min(step_s, remaining)
+        monitor.wait_for_condition(lambda: False, timeout_s=chunk)
+        remaining -= chunk
+    log_info(
+        "Cooldown selesai; melanjutkan proses.",
+        context=log_context or "-",
+    )
+
+
+FILTER_RATE_LIMITER = RequestRateLimiter()
+MAX_RATE_LIMIT_RETRIES = 5
+
+
+SUBMIT_RATE_LIMITER = RequestRateLimiter()
+SUBMIT_POST_SUCCESS_DELAY_S = 0.0
+
+
+def apply_rate_limit_profile(profile_name):
+    profile_key = (profile_name or "").strip().lower()
+    if profile_key not in RATE_LIMIT_PROFILES:
+        profile_key = DEFAULT_RATE_LIMIT_PROFILE
+    profile = RATE_LIMIT_PROFILES[profile_key]
+
+    FILTER_RATE_LIMITER.configure(
+        min_interval_s=profile.get("filter_min_interval_s"),
+        penalty_initial_s=profile.get("filter_penalty_initial_s"),
+        penalty_max_s=profile.get("filter_penalty_max_s"),
+        jitter_s=profile.get("filter_jitter_s"),
+    )
+    SUBMIT_RATE_LIMITER.configure(
+        min_interval_s=profile.get("submit_min_interval_s"),
+        penalty_initial_s=profile.get("submit_penalty_initial_s"),
+        penalty_max_s=profile.get("submit_penalty_max_s"),
+        jitter_s=profile.get("submit_jitter_s"),
+        cooldown_after=profile.get("submit_cooldown_after"),
+        cooldown_s=profile.get("submit_cooldown_s"),
+    )
+    global SUBMIT_POST_SUCCESS_DELAY_S
+    SUBMIT_POST_SUCCESS_DELAY_S = float(
+        profile.get("submit_success_delay_s") or 0.0
+    )
+    return profile_key
+
+
+apply_rate_limit_profile(DEFAULT_RATE_LIMIT_PROFILE)
 
 
 def install_user_activity_tracking(page, mark_activity):
@@ -175,13 +389,32 @@ def ensure_on_dirgc(
             return False
 
         if not monitor.wait_for_condition(
-            lambda: page.locator("#username").count() > 0, 15
+            lambda: (
+                page.locator("#username").count() > 0
+                or page.locator("input[name='username']").count() > 0
+            ),
+            30,
         ):
             log_warn("Login fields not found; switching to manual login.")
             return False
 
-        monitor.bot_fill("#username", username)
-        monitor.bot_fill("#password", password)
+        username_locator = page.locator("#username")
+        if username_locator.count() == 0:
+            username_locator = page.locator("input[name='username']")
+        if username_locator.count() == 0:
+            log_warn("Login fields not found; switching to manual login.")
+            return False
+        if not username_locator.first.is_visible():
+            if not monitor.wait_for_condition(
+                lambda: username_locator.first.is_visible(), 15
+            ):
+                log_warn(
+                    "Login fields not visible; switching to manual login."
+                )
+                return False
+
+        monitor.bot_fill("input#username, input[name='username']", username)
+        monitor.bot_fill("input#password, input[name='password']", password)
         monitor.bot_click("#kc-login")
 
         error_selectors = [
@@ -372,25 +605,57 @@ def apply_filter(page, monitor, idsbr, nama_usaha, alamat):
         )
 
     def search_with(idsbr_value, nama_value, alamat_value):
-        previous_snapshot = get_results_snapshot()
-        def is_gc_card(resp):
-            return (
-                "matchapro.web.bps.go.id/direktori-usaha/data-gc-card" in resp.url
-                and resp.request.method == "POST"
-                and resp.status == 200
-            )
+        attempts = 0
 
-        try:
-            with page.expect_response(is_gc_card, timeout=5000):
-                set_filter_values(idsbr_value, nama_value, alamat_value)
-        except PWTimeoutError:
-            # Response not observed; fall back to DOM-based waiting.
-            pass
-        except Exception:
-            pass
+        while True:
+            attempts += 1
+            remaining, reason = get_server_cooldown_remaining()
+            if remaining > 0:
+                log_warn(
+                    "Server cooldown aktif; menunda filter.",
+                    wait_s=round(remaining, 1),
+                    reason=reason or "-",
+                )
+                wait_with_keepalive(
+                    monitor, remaining, log_context="filter"
+                )
+            FILTER_RATE_LIMITER.wait_for_slot(monitor)
+            previous_snapshot = get_results_snapshot()
 
-        monitor.wait_for_condition(lambda: False, timeout_s=0.5)
-        return wait_for_results(previous_snapshot)
+            def is_gc_card(resp):
+                return (
+                    "matchapro.web.bps.go.id/direktori-usaha/data-gc-card" in resp.url
+                    and resp.request.method == "POST"
+                )
+
+            response_obj = None
+            try:
+                with page.expect_response(is_gc_card, timeout=5000) as resp_info:
+                    set_filter_values(idsbr_value, nama_value, alamat_value)
+                response_obj = resp_info.value
+            except PWTimeoutError:
+                response_obj = None
+            except Exception:
+                response_obj = None
+
+            status_code = response_obj.status if response_obj else None
+            if status_code == 429:
+                wait_penalty = FILTER_RATE_LIMITER.penalize()
+                log_warn(
+                    "Server rate limited filter request (HTTP 429).",
+                    attempt=attempts,
+                    wait_s=round(wait_penalty, 1),
+                )
+                if attempts >= MAX_RATE_LIMIT_RETRIES:
+                    raise RuntimeError(
+                        "Server DIRGC terus mengembalikan HTTP 429. "
+                        "Mohon beri jeda beberapa menit sebelum melanjutkan otomatisasi."
+                    )
+                continue
+
+            FILTER_RATE_LIMITER.reset_penalty()
+            monitor.wait_for_condition(lambda: False, timeout_s=0.5)
+            return wait_for_results(previous_snapshot)
 
     if idsbr:
         count = search_with(idsbr, "", "")

@@ -6,8 +6,7 @@ Aplikasi CLI berbasis Playwright untuk membantu otomatisasi isian field GC berda
 
 Tersedia dua versi: GUI dan Script atau Terminal. Alur singkatnya: mulai dari [Persiapan (Python dan Git)](#persiapan-python-dan-git), lanjut ke [Unduh Project](#unduh-project) dan [Instal Dependensi](#instal-dependensi), siapkan [File Excel](#file-excel), lalu jalankan via [GUI](#cara-menjalankan---gui) atau [Script atau Terminal](#cara-menjalankan---script-atau-terminal), jangan lupa [Konfigurasi Akun SSO](#konfigurasi-akun-sso) jika memilih via terminal.
 
-Jika ingin langsung menggunakan versi Installer GUI, lihat [packaging](https://github.com/bpskabbulungan/otomatisasidirgc-6502/tree/main/packaging). Tersedia juga versi .exe yang siap pakai, lihat di https://drive.google.com/file/d/1rewDhHUY_tDCxnPDB52lAVMijJvz1sDw/view?usp=sharing. 
-
+Jika ingin langsung menggunakan versi Installer GUI, lihat [packaging](https://github.com/bpskabbulungan/otomatisasidirgc-6502/tree/main/packaging). Tersedia juga versi .exe yang siap pakai, lihat di https://drive.google.com/drive/folders/1VxFIrrrOWCIpvV0NofT4r3zBD1O5CGhZ?usp=sharing.
 Namun, sebaiknya baca dokumentasi ini dulu agar alur kerjanya lebih jelas.
 
 ## Daftar Isi
@@ -30,12 +29,22 @@ Namun, sebaiknya baca dokumentasi ini dulu agar alur kerjanya lebih jelas.
 ```text
 .
 |- dirgc/                 # Modul utama aplikasi
+|  |- browser.py          # Util Playwright: login/redirect DIRGC, filter, rate limit, pilih hasil GC
+|  |- cli.py              # Parsing argumen CLI + orkestrasi run (Playwright -> proses Excel)
+|  |- credentials.py      # Load kredensial dari env/JSON + fallback path
+|  |- excel.py            # Baca Excel + normalisasi kolom/nilai (idsbr, nama, alamat, koordinat, hasil_gc)
+|  |- logging_utils.py    # Logger konsol + formatter (juga untuk GUI via handler)
+|  |- matching.py         # Pencocokan usaha dari hasil filter (token match + scoring)
+|  |- processor.py        # Proses utama per baris Excel: filter, pilih usaha, isi form, submit, log
+|  |- run_logs.py         # Generate path & tulis file log Excel (logs/run/YYYYMMDD/runN_HHMM.xlsx)
+|  |- settings.py         # Konstanta & default config (URL, timeout, file default, dsb)
 |  `- gui/                # GUI (PyQt5 + QFluentWidgets)
+|     `- app.py           # Seluruh UI: halaman Run/Update/SSO/Settings + worker thread
 |- config/                # Konfigurasi lokal (contoh: credentials)
 |- data/                  # File input (Excel)
-|- logs/                  # Output log per run (Excel)
-|- run_dirgc.py           # Entry point CLI (wrapper)
-|- run_dirgc_gui.py       # Entry point GUI
+|- logs/                  # Output log per run/update (Excel)
+|- run_dirgc.py           # Entry point CLI (wrapper -> dirgc.cli.main)
+|- run_dirgc_gui.py       # Entry point GUI (wrapper -> dirgc.gui.app.main)
 |- requirements.txt
 `- README.md
 ```
@@ -152,6 +161,19 @@ Setelah GUI terbuka:
 5. Di menu `Update`, pilih field yang ingin diperbarui (Hasil GC, Nama, Alamat, Koordinat).
    Jika field dipilih tetapi nilai Excel kosong, baris akan ditolak (status `gagal`).
    Untuk koordinat, boleh isi salah satu saja (latitude atau longitude).
+6. Jika sering muncul pesan *Something Went Wrong* saat submit, buka menu
+   `Mode Stabilitas` dan pilih mode agar jeda antar submit lebih panjang dan 429 lebih jarang muncul.
+
+### Menu pada GUI
+
+- **Beranda**: ringkasan singkat fungsi aplikasi dan cara pakai.
+- **Akun SSO**: tempat mengisi kredensial SSO untuk auto-login (tidak disimpan ke file).
+- **Run**: proses input GC dari Excel (operasional utama).
+- **Update**: memperbarui data via tombol **Edit Hasil** (Hasil GC/Nama/Alamat/Koordinat).
+- **Recap**: menarik semua data via API dan menyimpan Excel rekap di `logs/recap/`  
+  Output otomatis terpisah 3 sheet: **Sudah GC**, **Belum GC**, **Duplikat**.
+- **Mode Stabilitas**: memilih profil rate limit untuk mengurangi HTTP 429.
+- **Settings**: pengaturan lanjutan (idle timeout, web timeout, skala font, dsb).
 
 ## Cara Menjalankan - Script atau Terminal
 
@@ -184,15 +206,18 @@ Perintah di atas hanya memproses baris 1 sampai 5 (1-based, inklusif).
 ### Opsi CLI tambahan
 
 - `--headless` untuk menjalankan browser tanpa UI (SSO sering butuh mode non-headless).
-- `--idle-timeout-ms` untuk batas idle (default 300000 / 5 menit).
-- `--web-timeout-s` untuk toleransi loading web (default 30 detik).
+- `--idle-timeout-ms` untuk batas idle (default 1800000 / 30 menit).
+- Rekap via `--recap` menghasilkan Excel dengan 3 sheet: `Sudah GC`, `Belum GC`, `Duplikat`.
+- `--recap-backup-every` untuk mengatur backup `.bak` setiap N batch (default: 10, gunakan 0 untuk mematikan).
+- `--web-timeout-s` untuk toleransi loading web (default 300 detik).
 - `--manual-only` untuk selalu login manual (tanpa auto-fill kredensial).
 - `--dirgc-only` untuk berhenti di halaman DIRGC (tanpa filter/input).
 - `--edit-nama-alamat` untuk mengaktifkan toggle edit Nama/Alamat Usaha dan isi dari Excel.
-- `--keep-open` untuk menahan browser tetap terbuka setelah proses.
+- `--keep-open` untuk menahan browser tetap terbuka setelah proses (default aktif). Gunakan `--no-keep-open` untuk menutup otomatis.
 - `--update-mode` untuk menggunakan tombol Edit Hasil (update data).
 - `--prefer-web-coords` untuk mempertahankan koordinat yang sudah terisi di web.
 - `--update-fields` untuk memilih field yang di-update (contoh: `hasil_gc,nama_usaha,alamat,koordinat`).
+- `--rate-limit-profile` untuk mengatur kecepatan submit (normal/safe/ultra).
 
 Auto-login akan mencoba kredensial terlebih dulu; jika gagal/OTP muncul, akan beralih ke manual login.
 Secara default, koordinat diisi dari Excel (jika ada), meskipun web sudah berisi.
@@ -224,8 +249,21 @@ Untuk GUI, isi kredensial lewat menu `Akun SSO` (tidak disimpan ke file).
 
 ## Output Log Excel
 
-Setiap run akan menghasilkan file log Excel di folder `logs/YYYYMMDD/`.
+Setiap run akan menghasilkan file log Excel di folder `logs/run/YYYYMMDD/`.
+Untuk mode update, log berada di `logs/update/YYYYMMDD/`.
 Nama file mengikuti pola `run{N}_{HHMM}.xlsx` (contoh: `run1_0930.xlsx`).
+
+Untuk **rekap** (`--recap` / menu Recap), file output ada di `logs/recap/YYYYMMDD/`
+dengan nama `rekap{N}_{HHMMSS}.xlsx`. Penyimpanan rekap dibuat aman per batch:
+
+- Sebelum menulis, file lama dibackup menjadi `.bak`.
+- File baru ditulis ke file sementara, lalu di-`replace` secara atomik.
+- Jika file sedang terkunci (mis. dibuka di Excel), bisa muncul file `.new`.
+  Tutup Excel, lalu rename `.new` menjadi `.xlsx`. Proses rekap tetap berjalan.
+
+Jika terjadi error di batch tengah, batch sebelumnya tetap aman di file utama
+atau backup `.bak`.
+Frekuensi backup bisa diatur via `--recap-backup-every` (contoh: `--recap-backup-every 5`).
 
 Kolom log:
 
