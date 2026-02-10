@@ -866,7 +866,6 @@ def process_excel_rows(
                     missing_fields.append("alamat")
                 if update_lat and update_lon:
                     if not lat_text and not lon_text:
-                        # Koordinat kosong tetap boleh saat user memilih update koordinat.
                         pass
                     elif (lat_text and not lon_text) or (lon_text and not lat_text):
                         partial_label = (
