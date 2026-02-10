@@ -1161,30 +1161,49 @@ def process_excel_rows(
                         field=field_name,
                     )
                     return "", "missing", "", ""
-                try:
-                    current_value = locator.input_value()
-                except Exception:
-                    current_value = ""
-                current_value = _normalize_coord_text(current_value)
+                def read_value():
+                    try:
+                        return _normalize_coord_text(locator.input_value())
+                    except Exception:
+                        return ""
+
+                current_value = read_value()
                 desired_value = _normalize_coord_text(value)
 
                 if allow_overwrite:
                     if desired_value:
+                        filled = False
                         if current_value != desired_value:
                             monitor.mark_activity("bot")
-                            locator.fill(desired_value)
-                        return desired_value, "excel", current_value, desired_value
-                    if current_value:
-                        return current_value, "web", current_value, current_value
-                    return "", "empty", current_value, ""
+                            try:
+                                locator.fill(desired_value)
+                                filled = True
+                            except Exception:
+                                filled = False
+                        actual_value = read_value()
+                        if actual_value:
+                            source = "excel" if filled else "web"
+                            return actual_value, source, current_value, actual_value
+                        if current_value:
+                            return current_value, "web", current_value, current_value
+                        return "", "empty", current_value, ""
 
                 if current_value:
                     return current_value, "web", current_value, current_value
                 if not desired_value:
                     return "", "empty", current_value, ""
                 monitor.mark_activity("bot")
-                locator.fill(desired_value)
-                return desired_value, "excel", current_value, desired_value
+                filled = False
+                try:
+                    locator.fill(desired_value)
+                    filled = True
+                except Exception:
+                    filled = False
+                actual_value = read_value()
+                if actual_value:
+                    source = "excel" if filled else "web"
+                    return actual_value, source, current_value, actual_value
+                return "", "empty", current_value, ""
 
             lat_value = latitude if update_lat else None
             lon_value = longitude if update_lon else None
@@ -1553,6 +1572,17 @@ def process_excel_rows(
 
             monitor.wait_for_condition(find_swal, timeout_s=15)
 
+            def read_current_coord(selector):
+                locator = locate_visible(selector, form_scope)
+                if locator is None:
+                    locator = locate_visible(selector)
+                if locator is None:
+                    return "", False
+                try:
+                    return _normalize_coord_text(locator.input_value()), True
+                except Exception:
+                    return "", True
+
             if swal_result == "rate_limit":
                 handle_rate_limit_abort()
                 status = "error"
@@ -1566,12 +1596,22 @@ def process_excel_rows(
                 continue
 
             if swal_result == "confirm":
-                has_valid_lat = (
-                    _parse_coord_value(latitude_value, -90, 90) is not None
-                )
-                has_valid_lon = (
-                    _parse_coord_value(longitude_value, -180, 180) is not None
-                )
+                lat_text, lat_found = read_current_coord("#tt_latitude_cek_user")
+                lon_text, lon_found = read_current_coord("#tt_longitude_cek_user")
+                if lat_found or lon_found:
+                    has_valid_lat = (
+                        _parse_coord_value(lat_text, -90, 90) is not None
+                    )
+                    has_valid_lon = (
+                        _parse_coord_value(lon_text, -180, 180) is not None
+                    )
+                else:
+                    has_valid_lat = (
+                        _parse_coord_value(latitude_value, -90, 90) is not None
+                    )
+                    has_valid_lon = (
+                        _parse_coord_value(longitude_value, -180, 180) is not None
+                    )
                 if not (has_valid_lat and has_valid_lon):
                     confirm_popup = page.locator(
                         ".swal2-popup", has_text=confirm_text
