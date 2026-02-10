@@ -866,7 +866,8 @@ def process_excel_rows(
                     missing_fields.append("alamat")
                 if update_lat and update_lon:
                     if not lat_text and not lon_text:
-                        missing_fields.append("koordinat")
+                        # Koordinat kosong tetap boleh saat user memilih update koordinat.
+                        pass
                     elif (lat_text and not lon_text) or (lon_text and not lat_text):
                         partial_label = (
                             "latitude"
@@ -1161,13 +1162,27 @@ def process_excel_rows(
                         field=field_name,
                     )
                     return "", "missing", "", ""
+                def read_raw():
+                    try:
+                        return locator.input_value() or ""
+                    except Exception:
+                        return ""
+
                 def read_value():
                     try:
                         return _normalize_coord_text(locator.input_value())
                     except Exception:
                         return ""
 
-                current_value = read_value()
+                raw_value = read_raw()
+                current_value = _normalize_coord_text(raw_value)
+                if raw_value and not current_value:
+                    monitor.mark_activity("bot")
+                    try:
+                        locator.fill("")
+                    except Exception:
+                        pass
+                    current_value = ""
                 desired_value = _normalize_coord_text(value)
 
                 if allow_overwrite:

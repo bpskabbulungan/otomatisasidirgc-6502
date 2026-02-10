@@ -12,8 +12,10 @@ from .browser import (
     ActivityMonitor,
     apply_rate_limit_profile,
     ensure_on_dirgc,
+    is_visible,
     install_user_activity_tracking,
     set_server_cooldown,
+    wait_for_block_ui_clear,
 )
 from .credentials import load_credentials
 from .logging_utils import log_info, log_warn
@@ -31,6 +33,7 @@ from .settings import (
     DEFAULT_WEB_TIMEOUT_S,
     BLOCK_RESOURCE_DOMAINS,
     BLOCK_RESOURCE_TYPES,
+    BLOCK_UI_SELECTOR,
     ENABLE_RESOURCE_BLOCKING,
     MATCHAPRO_HOST,
     RATE_LIMIT_PROFILES,
@@ -346,27 +349,22 @@ def run_dirgc(
     timeout_scale = web_timeout_s / DEFAULT_WEB_TIMEOUT_S
 
     with sync_playwright() as p:
-        # browser = p.chromium.launch(headless=headless)
-        # context = browser.new_context()
-        # page = context.new_page()
-        browser = p.chromium.launch(
-            headless=headless,
-            args=[
-                '--disable-blink-features=AutomationControlled',
-                '--disable-dev-shm-usage',
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-infobars',
-                '--window-position=-5,-5',
-                '--disable-extensions',
-                '--user-agent=Mozilla/5.0 (Linux; Android 12; M2010J19CG Build/SKQ1.211202.001; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/143.0.7499.192 Mobile Safari/537.36'
-            ]
-        )
-        
+        launch_args = [
+            "--disable-blink-features=AutomationControlled",
+            "--disable-dev-shm-usage",
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-infobars",
+            "--window-position=-5,-5",
+            "--disable-extensions",
+            "--user-agent=Mozilla/5.0 (Linux; Android 12; M2010J19CG Build/SKQ1.211202.001; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/143.0.7499.192 Mobile Safari/537.36",
+        ]
+        browser = p.chromium.launch(headless=headless, args=launch_args)
+
         # CONTEXT ANDROID WEBVIEW
         context = browser.new_context(
-            viewport={'width': 390, 'height': 844},
-            screen={'width': 1080, 'height': 2340},
+            viewport={"width": 390, "height": 844},
+            screen={"width": 1080, "height": 2340},
             device_scale_factor=2.625,
             is_mobile=True,
             has_touch=True,
@@ -377,8 +375,9 @@ def run_dirgc(
                 "Sec-Ch-Ua-Platform": '"Android"',
             },
             java_script_enabled=True,
-            permissions=["geolocation"]
+            permissions=["geolocation"],
         )
+
         resource_blocking_enabled = (
             ENABLE_RESOURCE_BLOCKING
             and not api_log
@@ -459,6 +458,8 @@ def run_dirgc(
         )
         if dirgc_only or api_log or recap:
             wait_for_dirgc_ready(page, monitor, timeout_s=30)
+            if dirgc_only:
+                ensure_dirgc_interactive(page, monitor, timeout_s=15)
         if api_log and api_log_state and api_log_wait_s:
             wait_for_api_capture(
                 monitor,
@@ -724,6 +725,121 @@ def wait_for_dirgc_ready(page, monitor, timeout_s=30):
     except Exception:
         return False
     return monitor.wait_for_condition(is_ready, timeout_s=timeout_s)
+
+
+
+def ensure_dirgc_interactive(page, monitor, timeout_s=15):
+    try:
+        wait_for_block_ui_clear(page, monitor, timeout_s=timeout_s)
+    except Exception:
+        pass
+    if is_visible(page, BLOCK_UI_SELECTOR):
+        log_warn(
+            "DIRGC UI masih loading; mencoba melepas overlay untuk manual.",
+            selector=BLOCK_UI_SELECTOR,
+        )
+        try:
+            page.evaluate(
+                """
+                () => {
+                  const overlays = document.querySelectorAll(
+                    '.blockUI.blockOverlay, .blockUI.blockMsg'
+                  );
+                  overlays.forEach((el) => {
+                    el.style.display = 'none';
+                    el.style.pointerEvents = 'none';
+                    if (el.parentNode) {
+                      el.parentNode.removeChild(el);
+                    }
+                  });
+                }
+                """
+            )
+        except Exception as exc:
+            log_warn("Gagal melepas overlay loading.", error=str(exc))
+            return False
+    try:
+        def loading_overlay_gone():
+            return not page.evaluate(
+                """
+                () => {
+                  const viewportW = window.innerWidth || 0;
+                  const viewportH = window.innerHeight || 0;
+                  const minW = viewportW * 0.7;
+                  const minH = viewportH * 0.7;
+                  const isVisible = (el) => {
+                    if (!el) return false;
+                    const style = getComputedStyle(el);
+                    if (style.display === 'none' || style.visibility === 'hidden') return false;
+                    if (parseFloat(style.opacity || '1') <= 0) return false;
+                    const r = el.getBoundingClientRect();
+                    return r.width > 1 && r.height > 1;
+                  };
+                  const candidates = Array.from(
+                    document.querySelectorAll('.loading')
+                  );
+                  for (const el of candidates) {
+                    if (!isVisible(el)) continue;
+                    const r = el.getBoundingClientRect();
+                    const coversScreen = r.width >= minW && r.height >= minH;
+                    const style = getComputedStyle(el);
+                    const isOverlay =
+                      style.position === 'fixed' || style.position === 'absolute';
+                    if (coversScreen && isOverlay) {
+                      return false;
+                    }
+                  }
+                  return true;
+                }
+                """
+            )
+        if not monitor.wait_for_condition(
+            loading_overlay_gone, timeout_s=timeout_s
+        ):
+            removed = page.evaluate(
+                """
+                () => {
+                  const viewportW = window.innerWidth || 0;
+                  const viewportH = window.innerHeight || 0;
+                  const minW = viewportW * 0.7;
+                  const minH = viewportH * 0.7;
+                  const isVisible = (el) => {
+                    if (!el) return false;
+                    const style = getComputedStyle(el);
+                    if (style.display === 'none' || style.visibility === 'hidden') return false;
+                    if (parseFloat(style.opacity || '1') <= 0) return false;
+                    const r = el.getBoundingClientRect();
+                    return r.width > 1 && r.height > 1;
+                  };
+                  let removedCount = 0;
+                  const candidates = Array.from(
+                    document.querySelectorAll('.loading')
+                  );
+                  candidates.forEach((el) => {
+                    if (!isVisible(el)) return;
+                    const r = el.getBoundingClientRect();
+                    const coversScreen = r.width >= minW && r.height >= minH;
+                    const style = getComputedStyle(el);
+                    const isOverlay =
+                      style.position === 'fixed' || style.position === 'absolute';
+                    if (coversScreen && isOverlay) {
+                      el.style.display = 'none';
+                      el.style.pointerEvents = 'none';
+                      if (el.parentNode) {
+                        el.parentNode.removeChild(el);
+                      }
+                      removedCount += 1;
+                    }
+                  });
+                  return removedCount;
+                }
+                """
+            )
+            if removed:
+                log_warn("Menghapus overlay loading .loading.", count=removed)
+    except Exception as exc:
+        log_warn("Gagal mengecek overlay .loading.", error=str(exc))
+    return True
 
 
 def wait_for_api_capture(monitor, api_log_state, timeout_s=20):

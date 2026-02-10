@@ -159,8 +159,8 @@ Setelah GUI terbuka:
 3. Buka menu `Run` untuk input baru, atau menu `Update` untuk memperbarui data.
 4. Klik tombol mulai/update sesuai menu yang dipilih.
 5. Di menu `Update`, pilih field yang ingin diperbarui (Hasil GC, Nama, Alamat, Koordinat).
-   Jika field dipilih tetapi nilai Excel kosong, baris akan ditolak (status `gagal`).
-   Untuk koordinat, boleh isi salah satu saja (latitude atau longitude).
+   Jika field dipilih tetapi nilai Excel kosong, baris akan ditolak (status `gagal`), kecuali koordinat.
+   Untuk koordinat, boleh isi salah satu saja (latitude atau longitude) atau kosong seluruhnya.
 6. Jika sering muncul pesan *Something Went Wrong* saat submit, buka menu
    `Mode Stabilitas` dan pilih mode agar jeda antar submit lebih panjang dan 429 lebih jarang muncul.
 

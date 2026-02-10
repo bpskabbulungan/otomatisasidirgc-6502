@@ -1546,7 +1546,7 @@ class RunPage(QWidget):
         self._set_controls_enabled(not running)
 
     def _set_controls_enabled(self, enabled):
-        for widget in [
+        widgets = [
             self.excel_input,
             self.excel_browse,
             self.recent_combo,
@@ -1560,7 +1560,8 @@ class RunPage(QWidget):
             self.range_switch,
             self.start_spin,
             self.end_spin,
-        ]:
+        ]
+        for widget in widgets:
             widget.setEnabled(enabled)
         for switch in self._update_fields.values():
             switch.setEnabled(enabled)
