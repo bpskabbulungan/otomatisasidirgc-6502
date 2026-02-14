@@ -100,7 +100,7 @@ def save_gui_settings(data):
 
 def build_footer_label():
     footer = CaptionLabel(
-        'Made with ❤️ and ☕ - <a href="https://www.linkedin.com/in/novanniindipradana">'
+        'Made with ❤️ and ☕ - <a href="https://pradanain.github.io/portofolio/">'
         "Novanni Indi Pradana</a> - IPDS BPS 6502"
     )
     footer.setAlignment(Qt.AlignCenter)
@@ -2052,8 +2052,8 @@ class HomePage(QWidget):
         appreciation_layout.addWidget(SubtitleLabel("Dukungan"))
         appreciation_message = BodyLabel(
             'Kalau merasa terbantu, saya senang sekali jika Anda berkenan '
-            'memberi ulasan di <a href="https://www.linkedin.com/in/novanniindipradana">'
-            "LinkedIn</a>."
+            'mengunjungi portofolio saya di <a href="https://pradanain.github.io/portofolio/">'
+            "portofolio</a>."
         )
         appreciation_message.setWordWrap(True)
         appreciation_message.setTextFormat(Qt.RichText)
