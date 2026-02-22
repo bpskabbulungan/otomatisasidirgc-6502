@@ -88,10 +88,13 @@ class ActivityMonitor:
         self.mark_activity("bot")
         self.page.select_option(selector, **kwargs)
 
-    def bot_goto(self, url):
+    def bot_goto(self, url, wait_until="domcontentloaded", timeout_ms=None):
         self._check_stop()
         self.mark_activity("bot")
-        self.page.goto(url, wait_until="domcontentloaded")
+        kwargs = {"wait_until": wait_until}
+        if timeout_ms is not None:
+            kwargs["timeout"] = int(timeout_ms)
+        self.page.goto(url, **kwargs)
 
 
 class RequestRateLimiter:
@@ -340,6 +343,45 @@ def ensure_on_dirgc(
     def is_on_matchapro():
         return MATCHAPRO_HOST in page.url
 
+    def goto_target_with_retry(max_attempts=3):
+        attempts = max(1, int(max_attempts or 1))
+        last_error = None
+        for attempt in range(1, attempts + 1):
+            wait_until = "domcontentloaded"
+            timeout_ms = None
+            if attempt == 2:
+                # Fallback lebih longgar untuk kondisi resource lambat.
+                wait_until = "commit"
+            elif attempt >= 3:
+                # Percobaan terakhir: beri timeout eksplisit lebih besar.
+                scaled_s = monitor.scale_timeout(90) or 90
+                timeout_ms = int(max(15000, scaled_s * 1000))
+            try:
+                monitor.bot_goto(
+                    TARGET_URL,
+                    wait_until=wait_until,
+                    timeout_ms=timeout_ms,
+                )
+                return
+            except Exception as exc:
+                last_error = exc
+                error_text = str(exc).strip() or exc.__class__.__name__
+                log_warn(
+                    "Navigasi ke DIRGC gagal.",
+                    attempt=attempt,
+                    max_attempts=attempts,
+                    wait_until=wait_until,
+                    error=error_text,
+                )
+                if attempt >= attempts:
+                    break
+                pause_s = min(20, 4 * attempt)
+                monitor.wait_for_condition(lambda: False, timeout_s=pause_s)
+        raise RuntimeError(
+            "Tidak dapat membuka halaman DIRGC setelah beberapa percobaan. "
+            "Periksa koneksi VPN/jaringan lalu jalankan ulang."
+        ) from last_error
+
     def is_on_sso_login():
         if SSO_HOST in page.url:
             return True
@@ -445,7 +487,7 @@ def ensure_on_dirgc(
     username, password = credentials or (None, None)
 
     if not is_on_target():
-        monitor.bot_goto(TARGET_URL)
+        goto_target_with_retry(max_attempts=3)
 
     while True:
         if is_on_target():
@@ -484,7 +526,7 @@ def ensure_on_dirgc(
             continue
 
         if is_on_matchapro() and not is_on_target():
-            monitor.bot_goto(TARGET_URL)
+            goto_target_with_retry(max_attempts=3)
             continue
 
         monitor.wait_for_condition(lambda: False, timeout_s=2)

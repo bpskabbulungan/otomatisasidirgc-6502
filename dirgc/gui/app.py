@@ -339,6 +339,8 @@ class RunConfig:
     prefer_excel_coords: bool
     update_mode: bool
     update_fields: Optional[list]
+    validate_gc_preview: bool
+    validate_gc_mode: bool
     use_sso: bool
     sso_username: Optional[str]
     sso_password: Optional[str]
@@ -395,6 +397,8 @@ class RunWorker(QThread):
                 web_timeout_s=self._config.web_timeout_s,
                 keep_open=self._config.keep_open,
                 dirgc_only=self._config.dirgc_only,
+                validate_gc_preview=self._config.validate_gc_preview,
+                validate_gc_mode=self._config.validate_gc_mode,
                 edit_nama_alamat=self._config.edit_nama_alamat,
                 prefer_excel_coords=self._config.prefer_excel_coords,
                 update_mode=self._config.update_mode,
@@ -444,6 +448,7 @@ class RunPage(QWidget):
         parent=None,
         *,
         update_mode_default=False,
+        validate_gc_mode_default=False,
         title_text="Run DIRGC",
         subtitle_text="Atur file, opsi, lalu jalankan proses.",
         run_label="Mulai",
@@ -457,6 +462,10 @@ class RunPage(QWidget):
         self._sso_page = sso_page
         self._recent_excels = []
         self._update_mode_default = bool(update_mode_default)
+        self._validate_gc_mode_default = bool(validate_gc_mode_default)
+        self._mode_with_update_fields = (
+            self._update_mode_default or self._validate_gc_mode_default
+        )
         self._confirm_start_title = confirm_title
         self._confirm_start_message = confirm_message
         self._run_label = run_label
@@ -464,11 +473,12 @@ class RunPage(QWidget):
         self._settings_key = settings_key
         self._update_fields = {}
         self._cooldown_active = False
-        self._show_dirgc_only = not self._update_mode_default
-        self._show_edit_nama_alamat = not self._update_mode_default
-        self._show_prefer_web_coords = not self._update_mode_default
+        self._show_dirgc_only = not self._mode_with_update_fields
+        self._show_edit_nama_alamat = not self._mode_with_update_fields
+        self._show_prefer_web_coords = not self._mode_with_update_fields
         self._show_range = True
         self._show_keep_open = True
+        self._show_submit_request = not self._validate_gc_mode_default
 
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
@@ -606,8 +616,14 @@ class RunPage(QWidget):
         )
         card_layout.addWidget(coords_row)
         coords_row.setVisible(self._show_prefer_web_coords)
-        if self._update_mode_default:
-            card_layout.addWidget(SubtitleLabel("Field update"))
+        if self._mode_with_update_fields:
+            card_layout.addWidget(
+                SubtitleLabel(
+                    "Field validasi"
+                    if self._validate_gc_mode_default
+                    else "Field update"
+                )
+            )
 
             self._update_fields = {
                 "hasil_gc": SwitchButton(),
@@ -621,28 +637,44 @@ class RunPage(QWidget):
             card_layout.addWidget(
                 self._make_option_row(
                     "Hasil GC",
-                    "ON: perbarui nilai Hasil GC sesuai Excel.",
+                    (
+                        "ON: isi nilai Hasil GC ke form validasi."
+                        if self._validate_gc_mode_default
+                        else "ON: perbarui nilai Hasil GC sesuai Excel."
+                    ),
                     self._update_fields["hasil_gc"],
                 )
             )
             card_layout.addWidget(
                 self._make_option_row(
                     "Nama usaha",
-                    "ON: perbarui nama usaha dari Excel.",
+                    (
+                        "ON: isi nama usaha pada form validasi dari Excel."
+                        if self._validate_gc_mode_default
+                        else "ON: perbarui nama usaha dari Excel."
+                    ),
                     self._update_fields["nama_usaha"],
                 )
             )
             card_layout.addWidget(
                 self._make_option_row(
                     "Alamat usaha",
-                    "ON: perbarui alamat usaha dari Excel.",
+                    (
+                        "ON: isi alamat usaha pada form validasi dari Excel."
+                        if self._validate_gc_mode_default
+                        else "ON: perbarui alamat usaha dari Excel."
+                    ),
                     self._update_fields["alamat"],
                 )
             )
             card_layout.addWidget(
                 self._make_option_row(
                     "Koordinat (Lat/Long)",
-                    "ON: perbarui latitude dan longitude dari Excel.",
+                    (
+                        "ON: isi latitude dan longitude pada form validasi."
+                        if self._validate_gc_mode_default
+                        else "ON: perbarui latitude dan longitude dari Excel."
+                    ),
                     self._update_fields["koordinat"],
                 )
             )
@@ -711,14 +743,16 @@ class RunPage(QWidget):
 
         self.submit_request_switch = SwitchButton()
         self.submit_request_switch.setChecked(False)
-        advanced_layout.addWidget(
-            self._make_option_row(
-                "Submit via request (API)",
-                "ON: kirim POST langsung ke endpoint konfirmasi. "
-                "Pastikan sesuai aturan akses yang berlaku.",
-                self.submit_request_switch,
-            )
+        submit_request_row = self._make_option_row(
+            "Submit via request (API)",
+            "ON: kirim POST langsung ke endpoint konfirmasi. "
+            "Pastikan sesuai aturan akses yang berlaku.",
+            self.submit_request_switch,
         )
+        advanced_layout.addWidget(submit_request_row)
+        submit_request_row.setVisible(self._show_submit_request)
+        if not self._show_submit_request:
+            self.submit_request_switch.setChecked(False)
 
         refresh_row = QWidget()
         refresh_layout = QHBoxLayout(refresh_row)
@@ -1085,7 +1119,7 @@ class RunPage(QWidget):
             )
         else:
             self.stop_on_cooldown_switch.setChecked(False)
-        if "submit_via_request" in options:
+        if self._show_submit_request and "submit_via_request" in options:
             self.submit_request_switch.setChecked(
                 bool(options["submit_via_request"])
             )
@@ -1333,7 +1367,11 @@ class RunPage(QWidget):
 
         idle_timeout_s = load_idle_timeout_s()
         web_timeout_s = load_web_timeout_s()
-        submit_mode = "request" if self.submit_request_switch.isChecked() else "ui"
+        submit_mode = (
+            "request"
+            if self._show_submit_request and self.submit_request_switch.isChecked()
+            else "ui"
+        )
         session_refresh_every = self.session_refresh_spin.value()
 
         return RunConfig(
@@ -1350,6 +1388,8 @@ class RunPage(QWidget):
             prefer_excel_coords=not self.prefer_web_coords_switch.isChecked(),
             update_mode=self._update_mode_default,
             update_fields=update_fields,
+            validate_gc_preview=False,
+            validate_gc_mode=self._validate_gc_mode_default,
             use_sso=use_sso,
             sso_username=sso_username,
             sso_password=sso_password,
@@ -1809,6 +1849,8 @@ class RecapPage(RunPage):
             prefer_excel_coords=True,
             update_mode=False,
             update_fields=None,
+            validate_gc_preview=False,
+            validate_gc_mode=False,
             use_sso=use_sso,
             sso_username=sso_username,
             sso_password=sso_password,
@@ -1892,6 +1934,26 @@ class RecapPage(RunPage):
                 parent=self,
                 position=InfoBarPosition.TOP_RIGHT,
             )
+
+
+class ValidasiGCPage(RunPage):
+    def __init__(self, sso_page=None, parent=None):
+        super().__init__(
+            sso_page,
+            parent,
+            update_mode_default=False,
+            validate_gc_mode_default=True,
+            title_text="Validasi GC",
+            subtitle_text=(
+                "Validasi GC dari Excel melalui tombol "
+                "Laporkan Hasil GC - Tidak Valid."
+            ),
+            run_label="Mulai Validasi",
+            run_card_title="Validasi GC",
+            confirm_title="Mulai validasi GC",
+            confirm_message="Jalankan validasi GC sekarang?",
+            settings_key="options_validasi_gc",
+        )
 
 
 class HomePage(QWidget):
@@ -2545,6 +2607,7 @@ class MainWindow(FluentWindow):
             confirm_message="Mulai update sekarang?",
             settings_key="options_update",
         )
+        self.validasi_gc_page = ValidasiGCPage(self.sso_page, self)
         self.recap_page = RecapPage(self.sso_page, self)
         self.settings_page = SettingsPage(self._app, self)
         self.rate_limit_page = RateLimitPage(self)
@@ -2552,6 +2615,7 @@ class MainWindow(FluentWindow):
         self.run_page.setObjectName("run_page")
         self.sso_page.setObjectName("sso_page")
         self.update_page.setObjectName("update_page")
+        self.validasi_gc_page.setObjectName("validasi_gc_page")
         self.recap_page.setObjectName("recap_page")
         self.settings_page.setObjectName("settings_page")
         self.rate_limit_page.setObjectName("rate_limit_page")
@@ -2560,6 +2624,7 @@ class MainWindow(FluentWindow):
         self.addSubInterface(self.sso_page, FIF.PEOPLE, "Akun SSO")
         self.addSubInterface(self.run_page, FIF.PLAY, "Run")
         self.addSubInterface(self.update_page, FIF.EDIT, "Update")
+        self.addSubInterface(self.validasi_gc_page, FIF.CHECKBOX, "Validasi GC")
         self.addSubInterface(self.recap_page, FIF.DOCUMENT, "Recap")
         self.addSubInterface(
             self.rate_limit_page, FIF.INFO, "Mode Stabilitas"
@@ -2576,6 +2641,8 @@ class MainWindow(FluentWindow):
             self.run_page._save_settings()
         if self.update_page:
             self.update_page._save_settings()
+        if self.validasi_gc_page:
+            self.validasi_gc_page._save_settings()
         if self.recap_page:
             self.recap_page._save_settings()
         super().closeEvent(event)

@@ -11,6 +11,7 @@ from playwright.sync_api import sync_playwright
 from .browser import (
     ActivityMonitor,
     apply_rate_limit_profile,
+    apply_filter,
     ensure_on_dirgc,
     is_visible,
     install_user_activity_tracking,
@@ -123,6 +124,14 @@ def build_parser():
         help="Stop after reaching the DIRGC page (skip filter/input).",
     )
     parser.add_argument(
+        "--validate-gc-preview",
+        action="store_true",
+        help=(
+            "Masuk DIRGC, cari card PIPIT MUTIARA JAYA, klik "
+            "Laporkan Hasil GC - Tidak Valid, lalu berhenti."
+        ),
+    )
+    parser.add_argument(
         "--recap",
         dest="recap",
         action="store_true",
@@ -218,9 +227,17 @@ def build_parser():
         help="Gunakan mode update data (klik Edit Hasil).",
     )
     parser.add_argument(
+        "--validate-gc-mode",
+        action="store_true",
+        help=(
+            "Gunakan mode validasi GC dari Excel "
+            "(klik Laporkan Hasil GC - Tidak Valid)."
+        ),
+    )
+    parser.add_argument(
         "--update-fields",
         help=(
-            "Daftar field yang di-update saat --update-mode, "
+            "Daftar field yang dipakai saat --update-mode/--validate-gc-mode, "
             "pisahkan dengan koma (hasil_gc,nama_usaha,alamat,latitude,longitude,koordinat)."
         ),
     )
@@ -307,6 +324,8 @@ def run_dirgc(
     web_timeout_s=DEFAULT_WEB_TIMEOUT_S,
     keep_open=False,
     dirgc_only=False,
+    validate_gc_mode=False,
+    validate_gc_preview=False,
     edit_nama_alamat=False,
     prefer_excel_coords=True,
     update_mode=False,
@@ -341,6 +360,11 @@ def run_dirgc(
     ensure_vpn_connected(prefixes)
     ensure_playwright_browsers()
     apply_rate_limit_profile(rate_limit_profile)
+    if validate_gc_mode and update_mode:
+        log_warn(
+            "--update-mode diabaikan karena --validate-gc-mode aktif."
+        )
+        update_mode = False
     credentials_value = credentials
     if not manual_only and credentials_value is None:
         credentials_value = load_credentials(credentials_file)
@@ -456,9 +480,9 @@ def run_dirgc(
             use_saved_credentials=not manual_only,
             credentials=credentials_value,
         )
-        if dirgc_only or api_log or recap:
+        if dirgc_only or validate_gc_mode or validate_gc_preview or api_log or recap:
             wait_for_dirgc_ready(page, monitor, timeout_s=30)
-            if dirgc_only:
+            if dirgc_only or validate_gc_mode or validate_gc_preview:
                 ensure_dirgc_interactive(page, monitor, timeout_s=15)
         if api_log and api_log_state and api_log_wait_s:
             wait_for_api_capture(
@@ -479,6 +503,13 @@ def run_dirgc(
                 backup_every=recap_backup_every,
                 progress_callback=progress_callback,
             )
+        elif validate_gc_preview:
+            run_validasi_gc_preview(page, monitor)
+            if progress_callback:
+                try:
+                    progress_callback(0, 0, 0)
+                except Exception:
+                    pass
         elif dirgc_only:
             log_info(
                 "DIRGC page ready; skipping Excel processing.",
@@ -499,6 +530,7 @@ def run_dirgc(
                 edit_nama_alamat=edit_nama_alamat,
                 prefer_excel_coords=prefer_excel_coords,
                 update_mode=update_mode,
+                validate_report_mode=validate_gc_mode,
                 update_fields=update_fields,
                 start_row=start_row,
                 end_row=end_row,
@@ -725,6 +757,212 @@ def wait_for_dirgc_ready(page, monitor, timeout_s=30):
     except Exception:
         return False
     return monitor.wait_for_condition(is_ready, timeout_s=timeout_s)
+
+
+def _pick_visible(locator, max_checks=10):
+    try:
+        total = locator.count()
+    except Exception:
+        return None
+    if total <= 0:
+        return None
+    for idx in range(min(total, max_checks)):
+        try:
+            item = locator.nth(idx)
+            if item.is_visible():
+                return item
+        except Exception:
+            continue
+    try:
+        return locator.first
+    except Exception:
+        return None
+
+
+def _is_card_expanded(card_locator):
+    try:
+        classes = card_locator.get_attribute("class") or ""
+        if "expanded" in classes.split():
+            return True
+    except Exception:
+        pass
+    try:
+        details = card_locator.locator(".usaha-card-details")
+        return details.count() > 0 and details.first.is_visible()
+    except Exception:
+        return False
+
+
+def _read_input_value(page, selector):
+    try:
+        locator = page.locator(selector)
+        if locator.count() > 0:
+            return locator.first.input_value() or ""
+    except Exception:
+        return ""
+    return ""
+
+
+def run_validasi_gc_preview(
+    page,
+    monitor,
+    *,
+    nama_usaha_target="PIPIT MUTIARA JAYA",
+):
+    log_info(
+        "Validasi GC mode: mencari card target.",
+        nama_usaha=nama_usaha_target,
+    )
+
+    result_count = apply_filter(
+        page,
+        monitor,
+        idsbr="",
+        nama_usaha=nama_usaha_target,
+        alamat="",
+    )
+    log_info("Filter selesai.", count=result_count)
+
+    card_locator = page.locator(".usaha-card").filter(
+        has_text=nama_usaha_target
+    )
+    card = _pick_visible(card_locator, max_checks=20)
+    if card is None:
+        raise RuntimeError(
+            f"Card target '{nama_usaha_target}' tidak ditemukan."
+        )
+
+    header = _pick_visible(card.locator(".usaha-card-header"), max_checks=3)
+    if header is None:
+        raise RuntimeError("Header card target tidak ditemukan.")
+
+    if not _is_card_expanded(card):
+        try:
+            header.scroll_into_view_if_needed()
+        except Exception:
+            pass
+        monitor.bot_click(header)
+        expanded = monitor.wait_for_condition(
+            lambda: _is_card_expanded(card), timeout_s=8
+        )
+        if not expanded:
+            raise RuntimeError(
+                "Card target gagal dibuka (expanded state tidak muncul)."
+            )
+
+    report_btn = _pick_visible(card.locator(".btn-gc-report"), max_checks=4)
+    if report_btn is None:
+        report_btn = _pick_visible(page.locator(".btn-gc-report"), max_checks=8)
+    if report_btn is None:
+        raise RuntimeError(
+            "Tombol 'Laporkan Hasil GC - Tidak Valid' tidak ditemukan."
+        )
+
+    try:
+        report_btn.scroll_into_view_if_needed()
+    except Exception:
+        pass
+
+    before_url = page.url
+    before_pages = len(page.context.pages)
+    monitor.bot_click(report_btn)
+
+    def report_form_visible():
+        try:
+            locator = page.locator("#report_hasil_gc")
+            return locator.count() > 0 and locator.first.is_visible()
+        except Exception:
+            return False
+
+    def destination_detected():
+        try:
+            if len(page.context.pages) > before_pages:
+                return True
+        except Exception:
+            pass
+        if page.url != before_url:
+            return True
+        if report_form_visible():
+            return True
+        popup = page.locator(".swal2-popup, .modal.show, .offcanvas.show")
+        return popup.count() > 0 and popup.first.is_visible()
+
+    monitor.wait_for_condition(destination_detected, timeout_s=10)
+
+    after_url = page.url
+    destination = "same_page"
+    detail = ""
+
+    new_page_url = ""
+    try:
+        if len(page.context.pages) > before_pages:
+            new_page = page.context.pages[-1]
+            new_page_url = new_page.url or ""
+    except Exception:
+        new_page_url = ""
+
+    if new_page_url:
+        destination = "new_tab"
+        detail = new_page_url
+    elif after_url != before_url:
+        destination = "url_changed"
+        detail = after_url
+    elif report_form_visible():
+        destination = "report_form"
+        hasil_gc_value = _read_input_value(page, "#report_hasil_gc")
+        nama_value = _read_input_value(page, "#report_nama_usaha_gc")
+        nama_original = _read_input_value(page, "#report_nama_usaha_gc_original")
+        alamat_value = _read_input_value(page, "#report_alamat_usaha_gc")
+        alamat_original = _read_input_value(page, "#report_alamat_usaha_gc_original")
+        latitude_value = _read_input_value(page, "#report_latitude")
+        longitude_value = _read_input_value(page, "#report_longitude")
+
+        hasil_gc_options = []
+        try:
+            hasil_gc_options = page.locator("#report_hasil_gc option").evaluate_all(
+                "elements => elements.map(e => ({ value: e.value || '', text: (e.textContent || '').trim() }))"
+            )
+        except Exception:
+            hasil_gc_options = []
+        options_text = ", ".join(
+            [
+                f"{item.get('value', '')}:{item.get('text', '')}"
+                for item in hasil_gc_options[:8]
+            ]
+        )
+
+        detail = "Form report_validasi_gc terbuka."
+        log_info(
+            "Form report validasi GC terdeteksi.",
+            hasil_gc=hasil_gc_value or "-",
+            hasil_gc_options=options_text or "-",
+            nama_usaha=nama_value or "-",
+            nama_original=nama_original or "-",
+            alamat_usaha=alamat_value or "-",
+            alamat_original=alamat_original or "-",
+            latitude=latitude_value or "-",
+            longitude=longitude_value or "-",
+        )
+    else:
+        popup = page.locator(".swal2-popup, .modal.show, .offcanvas.show")
+        popup_visible = popup.count() > 0 and popup.first.is_visible()
+        if popup_visible:
+            destination = "popup_or_modal"
+            try:
+                raw_text = popup.first.inner_text() or ""
+                detail = " ".join(raw_text.split())
+            except Exception:
+                detail = ""
+            if len(detail) > 220:
+                detail = f"{detail[:220]}..."
+
+    log_info(
+        "Validasi GC mode selesai.",
+        destination=destination,
+        before_url=before_url,
+        after_url=after_url,
+        detail=detail or "-",
+    )
 
 
 
@@ -1106,6 +1344,8 @@ def main():
         web_timeout_s=args.web_timeout_s,
         keep_open=args.keep_open,
         dirgc_only=args.dirgc_only,
+        validate_gc_mode=args.validate_gc_mode,
+        validate_gc_preview=args.validate_gc_preview,
         edit_nama_alamat=args.edit_nama_alamat,
         prefer_excel_coords=not args.prefer_web_coords,
         update_mode=args.update_mode,

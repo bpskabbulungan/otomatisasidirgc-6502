@@ -20,7 +20,7 @@ from .logging_utils import log_error, log_info, log_warn
 from .matching import select_matching_card
 from .resume_state import save_resume_state
 from .run_logs import build_run_log_path, write_run_log, append_run_log_rows
-from .settings import RUN_LOG_CHECKPOINT_EVERY, TARGET_URL
+from .settings import HASIL_GC_LABELS, RUN_LOG_CHECKPOINT_EVERY, TARGET_URL
 
 
 RATE_LIMIT_POPUP_MARKERS = (
@@ -514,6 +514,263 @@ def _submit_via_request(page, payload, url, headers, timeout_ms=30000):
         "status_code": status_code,
     }
 
+
+def _normalize_hasil_label(text):
+    if text is None:
+        return ""
+    cleaned = " ".join(str(text).split())
+    cleaned = re.sub(r"^\d+\s*[.\)\-:]\s*", "", cleaned)
+    return cleaned.strip().lower()
+
+
+def _select_hasil_gc_value(page, monitor, selector, code):
+    if code is None:
+        return False
+    monitor.wait_for_condition(
+        lambda: page.locator(selector).count() > 0, timeout_s=15
+    )
+    select_locator = page.locator(selector).first
+    try:
+        options = select_locator.locator("option").evaluate_all(
+            "elements => elements.map(e => ({ value: e.value, text: e.textContent || '' }))"
+        )
+    except Exception:
+        options = []
+
+    code_value = str(code)
+    if options and any(opt.get("value") == code_value for opt in options):
+        monitor.bot_select_option(selector, value=code_value)
+        return True
+    if not options:
+        value_locator = select_locator.locator(f'option[value="{code_value}"]')
+        if value_locator.count() > 0:
+            monitor.bot_select_option(selector, value=code_value)
+            return True
+
+    code_key = _parse_int(code)
+    label = HASIL_GC_LABELS.get(code_key) if code_key is not None else None
+    if label and options:
+        target_norm = _normalize_hasil_label(label)
+        matched_value = None
+        for opt in options:
+            opt_text = opt.get("text", "")
+            if _normalize_hasil_label(opt_text) == target_norm:
+                matched_value = opt.get("value")
+                break
+        if matched_value is None:
+            for opt in options:
+                opt_text = opt.get("text", "")
+                if target_norm and target_norm in _normalize_hasil_label(opt_text):
+                    matched_value = opt.get("value")
+                    break
+        if matched_value is not None:
+            monitor.bot_select_option(selector, value=matched_value)
+            return True
+    return False
+
+
+def _collect_report_form_validation(page):
+    try:
+        payload = page.evaluate(
+            """
+            () => {
+              const ids = [
+                "report_hasil_gc",
+                "report_nama_usaha_gc",
+                "report_alamat_usaha_gc",
+                "report_latitude",
+                "report_longitude",
+              ];
+              const messages = [];
+              const fields = [];
+              ids.forEach((id) => {
+                const el = document.getElementById(id);
+                if (!el) return;
+                const raw = ("value" in el ? el.value : "") || "";
+                const value = String(raw).trim();
+                let msg = "";
+                try {
+                  if (typeof el.checkValidity === "function" && !el.checkValidity()) {
+                    msg = (el.validationMessage || "").trim();
+                  }
+                } catch (e) {}
+                const isInvalid = el.classList && el.classList.contains("is-invalid");
+                if (!msg && isInvalid) {
+                  msg = "Nilai tidak valid";
+                }
+                const required = !!el.required;
+                if (!msg && required && !value) {
+                  msg = "Wajib diisi";
+                }
+                if (msg) {
+                  messages.push(`${id}: ${msg}`);
+                }
+                fields.push({
+                  id,
+                  required,
+                  value,
+                  invalid: !!msg,
+                  validation_message: msg,
+                });
+              });
+              return { messages, fields };
+            }
+            """
+        )
+    except Exception:
+        return {"messages": [], "fields": []}
+    if not isinstance(payload, dict):
+        return {"messages": [], "fields": []}
+    messages = payload.get("messages")
+    fields = payload.get("fields")
+    if not isinstance(messages, list):
+        messages = []
+    if not isinstance(fields, list):
+        fields = []
+    clean_messages = []
+    for item in messages:
+        text = str(item or "").strip()
+        if text:
+            clean_messages.append(text)
+    return {"messages": clean_messages, "fields": fields}
+
+
+def _handle_report_submit_result(page, monitor):
+    success_markers = (
+        "berhasil",
+        "success",
+        "submitted",
+        "laporan berhasil",
+        "data submitted",
+    )
+    error_markers = (
+        "wajib",
+        "harus diisi",
+        "harus terisi",
+        "invalid",
+        "gagal",
+        "error",
+        "periksa kembali",
+    )
+
+    def read_swal_message():
+        try:
+            payload = page.evaluate(
+                """
+                () => {
+                  const popup = document.querySelector(".swal2-popup");
+                  if (!popup) return null;
+                  const isVisible = () => {
+                    const style = window.getComputedStyle(popup);
+                    if (!style) return false;
+                    if (style.display === "none" || style.visibility === "hidden") return false;
+                    const rect = popup.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0;
+                  };
+                  if (!isVisible()) return null;
+                  const title = (popup.querySelector("#swal2-title")?.textContent || "").trim();
+                  const body = (popup.querySelector("#swal2-html-container")?.textContent || "").trim();
+                  const text = (popup.innerText || "").trim();
+                  return {
+                    title,
+                    body,
+                    text,
+                  };
+                }
+                """
+            )
+        except Exception:
+            return {"title": "", "body": "", "text": ""}
+        if not isinstance(payload, dict):
+            return {"title": "", "body": "", "text": ""}
+        return {
+            "title": str(payload.get("title") or "").strip(),
+            "body": str(payload.get("body") or "").strip(),
+            "text": str(payload.get("text") or "").strip(),
+        }
+
+    def swal_visible():
+        popup = page.locator(".swal2-popup")
+        return popup.count() > 0 and popup.first.is_visible()
+
+    def wait_signal():
+        if detect_rate_limit_popup_text(page).strip():
+            return True
+        if swal_visible():
+            return True
+        report_validation = _collect_report_form_validation(page)
+        return bool(report_validation.get("messages"))
+
+    monitor.wait_for_condition(wait_signal, timeout_s=12)
+
+    rate_text = detect_rate_limit_popup_text(page).strip()
+    if rate_text:
+        return {
+            "ok": False,
+            "status": "error",
+            "rate_limit": True,
+            "message": rate_text,
+        }
+
+    if swal_visible():
+        popup = page.locator(".swal2-popup").first
+        swal_msg = read_swal_message()
+        popup_title = " ".join((swal_msg.get("title") or "").split())
+        popup_body = " ".join((swal_msg.get("body") or "").split())
+        popup_text = " ".join((swal_msg.get("text") or "").split())
+        combined_text = " ".join(
+            part for part in (popup_title, popup_body, popup_text) if part
+        )
+        lowered = combined_text.lower()
+        is_success = any(marker in lowered for marker in success_markers) and not any(
+            marker in lowered for marker in error_markers
+        )
+        try:
+            confirm_btn = popup.locator(".swal2-confirm")
+            if confirm_btn.count() > 0 and confirm_btn.first.is_visible():
+                monitor.bot_click(confirm_btn.first)
+        except Exception:
+            pass
+        if is_success:
+            return {
+                "ok": True,
+                "status": "success",
+                "message": popup_body or popup_text or "Laporan validasi terkirim.",
+            }
+        return {
+            "ok": False,
+            "status": "gagal",
+            "message": popup_body or popup_text or "Validasi web menolak data laporan.",
+        }
+
+    report_validation = _collect_report_form_validation(page)
+    messages = report_validation.get("messages") or []
+    if messages:
+        return {
+            "ok": False,
+            "status": "gagal",
+            "message": "Validasi web: " + "; ".join(messages[:3]),
+        }
+
+    form_visible = False
+    try:
+        locator = page.locator("#report_hasil_gc")
+        form_visible = locator.count() > 0 and locator.first.is_visible()
+    except Exception:
+        form_visible = False
+    if form_visible:
+        return {
+            "ok": False,
+            "status": "gagal",
+            "message": "Validasi web menolak data laporan (tanpa pesan detail).",
+        }
+
+    return {
+        "ok": True,
+        "status": "success",
+        "message": "Laporan validasi terkirim.",
+    }
+
 def process_excel_rows(
     page,
     monitor,
@@ -523,6 +780,7 @@ def process_excel_rows(
     edit_nama_alamat=False,
     prefer_excel_coords=True,
     update_mode=False,
+    validate_report_mode=False,
     update_fields=None,
     start_row=None,
     end_row=None,
@@ -531,8 +789,9 @@ def process_excel_rows(
     session_refresh_every=0,
     stop_on_cooldown=False,
 ):
+    mode_with_update_fields = bool(update_mode or validate_report_mode)
     run_log_path = build_run_log_path(
-        log_type="update" if update_mode else "run"
+        log_type="update" if mode_with_update_fields else "run"
     )
     run_log_rows = []
     try:
@@ -636,6 +895,11 @@ def process_excel_rows(
     submit_mode = (submit_mode or "ui").strip().lower()
     if submit_mode not in ("ui", "request"):
         submit_mode = "ui"
+    if validate_report_mode and submit_mode == "request":
+        log_warn(
+            "Submit via request tidak didukung di mode Validasi GC; fallback ke UI."
+        )
+        submit_mode = "ui"
     try:
         session_refresh_every = int(session_refresh_every or 0)
     except (TypeError, ValueError):
@@ -694,7 +958,7 @@ def process_excel_rows(
         hasil_gc_after = ""
 
         update_fields_set = None
-        if update_mode:
+        if mode_with_update_fields:
             if isinstance(update_fields, (list, tuple, set)):
                 update_fields_set = {
                     str(item).strip().lower()
@@ -704,28 +968,28 @@ def process_excel_rows(
             elif update_fields is not None:
                 update_fields_set = set()
         update_hasil_gc = (
-            not update_mode
+            not mode_with_update_fields
             or update_fields_set is None
             or "hasil_gc" in update_fields_set
         )
         update_nama = (
-            not update_mode
+            not mode_with_update_fields
             or update_fields_set is None
             or "nama_usaha" in update_fields_set
         )
         update_alamat = (
-            not update_mode
+            not mode_with_update_fields
             or update_fields_set is None
             or "alamat" in update_fields_set
         )
         update_lat = (
-            not update_mode
+            not mode_with_update_fields
             or update_fields_set is None
             or "latitude" in update_fields_set
             or "koordinat" in update_fields_set
         )
         update_lon = (
-            not update_mode
+            not mode_with_update_fields
             or update_fields_set is None
             or "longitude" in update_fields_set
             or "koordinat" in update_fields_set
@@ -757,12 +1021,19 @@ def process_excel_rows(
                     update_field_labels.append("longitude")
         update_fields_label = ", ".join(update_field_labels) or "-"
         log_info(
-            "Update fields.",
+            "Field proses.",
             idsbr=idsbr or "-",
             fields=update_fields_label,
+            mode=(
+                "validasi_gc"
+                if validate_report_mode
+                else ("update" if update_mode else "run")
+            ),
         )
 
         def build_success_note(server_message):
+            if validate_report_mode:
+                return f"Validasi GC sukses: {update_fields_label}."
             if update_mode or edit_nama_alamat:
                 return f"Update sukses: {update_fields_label}."
             message = (server_message or "").strip()
@@ -854,7 +1125,7 @@ def process_excel_rows(
                 wait_with_keepalive(
                     monitor, remaining, log_context="pre-filter"
                 )
-            if update_mode:
+            if mode_with_update_fields:
                 missing_fields = []
                 lat_text = (latitude or "").strip()
                 lon_text = (longitude or "").strip()
@@ -889,12 +1160,20 @@ def process_excel_rows(
                 if missing_fields:
                     missing_label = ", ".join(missing_fields)
                     log_warn(
-                        "Update ditolak: field kosong di Excel.",
+                        (
+                            "Validasi ditolak: field kosong di Excel."
+                            if validate_report_mode
+                            else "Update ditolak: field kosong di Excel."
+                        ),
                         idsbr=idsbr or "-",
                         fields=missing_label,
                     )
                     status = "gagal"
-                    note = f"Update ditolak: field kosong ({missing_label})"
+                    note = (
+                        f"Validasi ditolak: field kosong ({missing_label})"
+                        if validate_report_mode
+                        else f"Update ditolak: field kosong ({missing_label})"
+                    )
                     continue
 
             log_info(
@@ -958,7 +1237,7 @@ def process_excel_rows(
                 try:
                     candidate = pick_visible(
                         card_scope.locator(
-                            "[data-id].btn-gc-edit, [data-id].btn-tandai, [data-id].btn-detail-link, [data-id].btn-gc-map, [data-id]"
+                            "[data-id].btn-gc-edit, [data-id].btn-gc-report, [data-id].btn-tandai, [data-id].btn-detail-link, [data-id].btn-gc-map, [data-id]"
                         )
                     )
                     if candidate is not None:
@@ -1036,7 +1315,7 @@ def process_excel_rows(
                         raise
                 monitor.wait_for_condition(is_card_expanded, timeout_s=6)
 
-            if not update_mode:
+            if not (update_mode or validate_report_mode):
                 if (
                     card_scope.locator(
                         ".gc-badge", has_text="Sudah GC"
@@ -1058,18 +1337,55 @@ def process_excel_rows(
                 note = "Duplikat"
                 continue
 
-            action_selector = ".btn-gc-edit" if update_mode else ".btn-tandai"
-            action_label = "Edit Hasil" if update_mode else "Tandai"
+            if validate_report_mode:
+                action_selector = ".btn-gc-report"
+                action_label = "Laporkan Hasil GC - Tidak Valid"
+                hasil_selector = "#report_hasil_gc"
+                lat_selector = "#report_latitude"
+                lon_selector = "#report_longitude"
+                nama_toggle_selector = "#report_toggle_edit_nama"
+                nama_input_selector = "#report_nama_usaha_gc"
+                alamat_toggle_selector = "#report_toggle_edit_alamat"
+                alamat_input_selector = "#report_alamat_usaha_gc"
+                submit_selector = "#submit-report-gc-btn"
+            elif update_mode:
+                action_selector = ".btn-gc-edit"
+                action_label = "Edit Hasil"
+                hasil_selector = "#tt_hasil_gc"
+                lat_selector = "#tt_latitude_cek_user"
+                lon_selector = "#tt_longitude_cek_user"
+                nama_toggle_selector = "#toggle_edit_nama"
+                nama_input_selector = "#tt_nama_usaha_gc"
+                alamat_toggle_selector = "#toggle_edit_alamat"
+                alamat_input_selector = "#tt_alamat_usaha_gc"
+                submit_selector = "#save-tandai-usaha-btn"
+            else:
+                action_selector = ".btn-tandai"
+                action_label = "Tandai"
+                hasil_selector = "#tt_hasil_gc"
+                lat_selector = "#tt_latitude_cek_user"
+                lon_selector = "#tt_longitude_cek_user"
+                nama_toggle_selector = "#toggle_edit_nama"
+                nama_input_selector = "#tt_nama_usaha_gc"
+                alamat_toggle_selector = "#toggle_edit_alamat"
+                alamat_input_selector = "#tt_alamat_usaha_gc"
+                submit_selector = "#save-tandai-usaha-btn"
             action_locator = card_scope.locator(action_selector)
             if action_locator.count() == 0:
                 action_locator = page.locator(action_selector)
             action_button = pick_visible(action_locator)
             if action_button is None:
-                missing_note = (
-                    "Tombol Edit Hasil tidak ditemukan (kemungkinan belum GC; gunakan menu Run)."
-                    if update_mode
-                    else "Tombol Tandai tidak ditemukan."
-                )
+                if validate_report_mode:
+                    missing_note = (
+                        "Tombol Laporkan Hasil GC - Tidak Valid tidak ditemukan."
+                    )
+                elif update_mode:
+                    missing_note = (
+                        "Tombol Edit Hasil tidak ditemukan "
+                        "(kemungkinan belum GC; gunakan menu Run)."
+                    )
+                else:
+                    missing_note = "Tombol Tandai tidak ditemukan."
                 log_warn(
                     f"Tombol {action_label} tidak ditemukan; skipping.",
                     idsbr=idsbr or "-",
@@ -1097,17 +1413,21 @@ def process_excel_rows(
                 note = f"Tombol {action_label} gagal diklik"
                 continue
             form_ready = monitor.wait_for_condition(
-                lambda: locate_visible("#tt_hasil_gc") is not None,
+                lambda: locate_visible(hasil_selector) is not None,
                 timeout_s=30,
             )
             if not form_ready:
                 log_warn(
-                    "Form Hasil GC tidak muncul; skipping.",
+                    "Form tidak muncul setelah klik aksi; skipping.",
                     idsbr=idsbr or "-",
                 )
                 stats["skipped_no_tandai"] += 1
                 status = "gagal"
-                note = "Form Hasil GC tidak muncul"
+                note = (
+                    "Form Validasi GC tidak muncul"
+                    if validate_report_mode
+                    else "Form Hasil GC tidak muncul"
+                )
                 continue
 
             form_scope = page
@@ -1117,14 +1437,20 @@ def process_excel_rows(
 
             if update_hasil_gc:
                 select_locator = (
-                    locate_visible("#tt_hasil_gc", form_scope)
-                    or page.locator("#tt_hasil_gc").first
+                    locate_visible(hasil_selector, form_scope)
+                    or page.locator(hasil_selector).first
                 )
                 try:
                     hasil_gc_before = select_locator.input_value() or ""
                 except Exception:
                     hasil_gc_before = ""
-                if hasil_gc_select(page, monitor, hasil_gc):
+                if (
+                    _select_hasil_gc_value(
+                        page, monitor, hasil_selector, hasil_gc
+                    )
+                    if validate_report_mode
+                    else hasil_gc_select(page, monitor, hasil_gc)
+                ):
                     hasil_gc_after = str(hasil_gc) if hasil_gc is not None else ""
                     log_info(
                         "Hasil GC set.", hasil_gc=hasil_gc, idsbr=idsbr or "-"
@@ -1138,11 +1464,15 @@ def process_excel_rows(
                     )
                     stats["hasil_gc_skipped"] += 1
                     status = "gagal"
-                    note = "Hasil GC tidak valid/kosong"
+                    note = (
+                        "Hasil GC validasi tidak valid/kosong"
+                        if validate_report_mode
+                        else "Hasil GC tidak valid/kosong"
+                    )
             else:
                 select_locator = (
-                    locate_visible("#tt_hasil_gc", form_scope)
-                    or page.locator("#tt_hasil_gc").first
+                    locate_visible(hasil_selector, form_scope)
+                    or page.locator(hasil_selector).first
                 )
                 try:
                     hasil_gc_before = select_locator.input_value() or ""
@@ -1225,7 +1555,7 @@ def process_excel_rows(
             allow_overwrite_lon = prefer_excel_coords if update_lon else False
             latitude_value, latitude_source, latitude_before, latitude_after = (
                 safe_fill(
-                    "#tt_latitude_cek_user",
+                    lat_selector,
                     lat_value,
                     "latitude",
                     allow_overwrite_lat,
@@ -1234,7 +1564,7 @@ def process_excel_rows(
             )
             longitude_value, longitude_source, longitude_before, longitude_after = (
                 safe_fill(
-                    "#tt_longitude_cek_user",
+                    lon_selector,
                     lon_value,
                     "longitude",
                     allow_overwrite_lon,
@@ -1301,19 +1631,19 @@ def process_excel_rows(
                 input_locator.fill(desired_value)
                 return current_value, desired_value
 
-            if update_mode:
+            if update_mode or validate_report_mode:
                 if update_nama:
                     nama_before, nama_after = ensure_edit_field(
-                        "#toggle_edit_nama",
-                        "#tt_nama_usaha_gc",
+                        nama_toggle_selector,
+                        nama_input_selector,
                         nama_usaha,
                         "nama_usaha",
                         form_scope,
                     )
                 if update_alamat:
                     alamat_before, alamat_after = ensure_edit_field(
-                        "#toggle_edit_alamat",
-                        "#tt_alamat_usaha_gc",
+                        alamat_toggle_selector,
+                        alamat_input_selector,
                         alamat,
                         "alamat",
                         form_scope,
@@ -1350,15 +1680,25 @@ def process_excel_rows(
                 monitor.bot_goto(TARGET_URL)
                 continue
 
-            if status == "gagal" and note == "Hasil GC tidak valid/kosong":
+            if status == "gagal" and note in {
+                "Hasil GC tidak valid/kosong",
+                "Hasil GC validasi tidak valid/kosong",
+            }:
+                monitor.bot_goto(TARGET_URL)
+                continue
+            if validate_report_mode and not _normalize_coord_text(hasil_gc_after):
+                log_warn(
+                    "Validasi ditolak sebelum submit: opsi keberadaan usaha belum terisi.",
+                    idsbr=idsbr or "-",
+                )
+                status = "gagal"
+                note = "Opsi keberadaan usaha hasil gc harus terisi!"
                 monitor.bot_goto(TARGET_URL)
                 continue
 
-            submit_locator = locate_visible(
-                "#save-tandai-usaha-btn", form_scope
-            )
+            submit_locator = locate_visible(submit_selector, form_scope)
             if submit_locator is None:
-                submit_locator = locate_visible("#save-tandai-usaha-btn")
+                submit_locator = locate_visible(submit_selector)
             if submit_locator is None:
                 log_warn(
                     "Tombol submit tidak ditemukan; skipping.",
@@ -1520,6 +1860,51 @@ def process_excel_rows(
                 )
                 status = "gagal"
                 note = "Tombol submit gagal diklik"
+                monitor.bot_goto(TARGET_URL)
+                continue
+
+            if validate_report_mode:
+                submit_result = _handle_report_submit_result(page, monitor)
+                if submit_result.get("rate_limit"):
+                    wait_penalty = SUBMIT_RATE_LIMITER.penalize()
+                    detail = (submit_result.get("message") or "").strip()
+                    log_warn(
+                        "Server menolak submit laporan validasi; kemungkinan rate limit.",
+                        idsbr=idsbr or "-",
+                        wait_s=round(wait_penalty, 1),
+                        detail=detail or "-",
+                    )
+                    monitor.wait_for_condition(
+                        lambda: False, timeout_s=wait_penalty
+                    )
+                    status = "error"
+                    note = (
+                        "Submit laporan validasi ditolak server (HTTP 429/rate limit)."
+                        if not detail
+                        else (
+                            "Submit laporan validasi ditolak server (HTTP 429/rate limit). "
+                            + detail
+                        )
+                    )
+                    monitor.bot_goto(TARGET_URL)
+                    continue
+                if submit_result.get("ok"):
+                    SUBMIT_RATE_LIMITER.reset_penalty()
+                    if SUBMIT_POST_SUCCESS_DELAY_S > 0:
+                        monitor.wait_for_condition(
+                            lambda: False,
+                            timeout_s=SUBMIT_POST_SUCCESS_DELAY_S,
+                        )
+                    status = "berhasil"
+                    note = build_success_note(submit_result.get("message"))
+                    session_submit_count += 1
+                    monitor.bot_goto(TARGET_URL)
+                    continue
+                status = submit_result.get("status") or "gagal"
+                note = (
+                    submit_result.get("message")
+                    or "Submit laporan validasi gagal."
+                )
                 monitor.bot_goto(TARGET_URL)
                 continue
 
