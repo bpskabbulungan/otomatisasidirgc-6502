@@ -18,6 +18,7 @@ Namun, sebaiknya baca dokumentasi ini dulu agar alur kerjanya lebih jelas.
 - [Instal Dependensi](#instal-dependensi)
 - [File Excel](#file-excel)
 - [Cara Menjalankan - GUI](#cara-menjalankan---gui)
+- [Detail Mode Validasi GC (GUI)](#detail-mode-validasi-gc-gui)
 - [Cara Menjalankan - Script atau Terminal](#cara-menjalankan---script-atau-terminal)
 - [Konfigurasi Akun SSO](#konfigurasi-akun-sso)
 - [Catatan](#catatan)
@@ -39,7 +40,7 @@ Namun, sebaiknya baca dokumentasi ini dulu agar alur kerjanya lebih jelas.
 |  |- run_logs.py         # Generate path & tulis file log Excel (logs/run/YYYYMMDD/runN_HHMM.xlsx)
 |  |- settings.py         # Konstanta & default config (URL, timeout, file default, dsb)
 |  `- gui/                # GUI (PyQt5 + QFluentWidgets)
-|     `- app.py           # Seluruh UI: halaman Run/Update/SSO/Settings + worker thread
+|     `- app.py           # Seluruh UI: halaman Run/Update/Validasi GC/Recap/SSO/Settings + worker thread
 |- config/                # Konfigurasi lokal (contoh: credentials)
 |- data/                  # File input (Excel)
 |- logs/                  # Output log per run/update (Excel)
@@ -156,9 +157,9 @@ Setelah GUI terbuka:
 
 1. Buka menu `Akun SSO`, isi username dan password jika ingin auto-login.
 2. Pilih file Excel (atau pastikan file default sudah ada di `data/`).
-3. Buka menu `Run` untuk input baru, atau menu `Update` untuk memperbarui data.
-4. Klik tombol mulai/update sesuai menu yang dipilih.
-5. Di menu `Update`, pilih field yang ingin diperbarui (Hasil GC, Nama, Alamat, Koordinat).
+3. Buka menu `Run` untuk input baru, `Update` untuk edit hasil GC, atau `Validasi GC` untuk kirim laporan validasi.
+4. Klik tombol mulai/update/validasi sesuai menu yang dipilih.
+5. Di menu `Update` dan `Validasi GC`, pilih field yang ingin diproses (Hasil GC, Nama, Alamat, Koordinat).
    Jika field dipilih tetapi nilai Excel kosong, baris akan ditolak (status `gagal`), kecuali koordinat.
    Untuk koordinat, boleh isi salah satu saja (latitude atau longitude) atau kosong seluruhnya.
 6. Jika sering muncul pesan *Something Went Wrong* saat submit, buka menu
@@ -170,10 +171,28 @@ Setelah GUI terbuka:
 - **Akun SSO**: tempat mengisi kredensial SSO untuk auto-login (tidak disimpan ke file).
 - **Run**: proses input GC dari Excel (operasional utama).
 - **Update**: memperbarui data via tombol **Edit Hasil** (Hasil GC/Nama/Alamat/Koordinat).
+- **Validasi GC**: validasi data via tombol **Laporkan Hasil GC - Tidak Valid** (Hasil GC/Nama/Alamat/Koordinat) dan submit **KIRIM LAPORAN**.
 - **Recap**: menarik semua data via API dan menyimpan Excel rekap di `logs/recap/`  
   Output otomatis terpisah 3 sheet: **Sudah GC**, **Belum GC**, **Duplikat**.
 - **Mode Stabilitas**: memilih profil rate limit untuk mengurangi HTTP 429.
 - **Settings**: pengaturan lanjutan (idle timeout, web timeout, skala font, dsb).
+
+### Detail Mode Validasi GC (GUI)
+
+Menu `Validasi GC` memakai alur seperti `Update`, tetapi tombol aksi pada kartu usaha berbeda:
+
+1. Filter data berdasarkan `idsbr`/`nama_usaha`/`alamat` dari Excel.
+2. Buka kartu usaha hasil cocok.
+3. Klik tombol **Laporkan Hasil GC - Tidak Valid** (`.btn-gc-report`).
+4. Isi form validasi report:
+   - `#report_hasil_gc`
+   - `#report_toggle_edit_nama` + `#report_nama_usaha_gc`
+   - `#report_toggle_edit_alamat` + `#report_alamat_usaha_gc`
+   - `#report_latitude` dan `#report_longitude`
+5. Klik tombol **KIRIM LAPORAN** (`#submit-report-gc-btn`).
+6. Sistem membaca validasi dari web (SweetAlert/form validation). Jika muncul pesan error
+   seperti `Opsi keberadaan usaha hasil gc harus terisi!`, baris ditandai `gagal`
+   dan pesan disimpan ke kolom `catatan` pada log.
 
 ## Cara Menjalankan - Script atau Terminal
 
@@ -215,9 +234,12 @@ Perintah di atas hanya memproses baris 1 sampai 5 (1-based, inklusif).
 - `--edit-nama-alamat` untuk mengaktifkan toggle edit Nama/Alamat Usaha dan isi dari Excel.
 - `--keep-open` untuk menahan browser tetap terbuka setelah proses (default aktif). Gunakan `--no-keep-open` untuk menutup otomatis.
 - `--update-mode` untuk menggunakan tombol Edit Hasil (update data).
+- `--validate-gc-mode` untuk mode validasi GC dari Excel (klik tombol **Laporkan Hasil GC - Tidak Valid** lalu submit **KIRIM LAPORAN**).
+- `--validate-gc-preview` untuk uji cepat buka form validasi dari card target (tanpa proses batch Excel).
 - `--prefer-web-coords` untuk mempertahankan koordinat yang sudah terisi di web.
-- `--update-fields` untuk memilih field yang di-update (contoh: `hasil_gc,nama_usaha,alamat,koordinat`).
+- `--update-fields` untuk memilih field yang diproses saat `--update-mode`/`--validate-gc-mode` (contoh: `hasil_gc,nama_usaha,alamat,koordinat`).
 - `--rate-limit-profile` untuk mengatur kecepatan submit (normal/safe/ultra).
+- `--submit-mode request` tidak dipakai pada `--validate-gc-mode` (otomatis fallback ke `ui`).
 
 Auto-login akan mencoba kredensial terlebih dulu; jika gagal/OTP muncul, akan beralih ke manual login.
 Secara default, koordinat diisi dari Excel (jika ada), meskipun web sudah berisi.
@@ -250,7 +272,7 @@ Untuk GUI, isi kredensial lewat menu `Akun SSO` (tidak disimpan ke file).
 ## Output Log Excel
 
 Setiap run akan menghasilkan file log Excel di folder `logs/run/YYYYMMDD/`.
-Untuk mode update, log berada di `logs/update/YYYYMMDD/`.
+Untuk mode update/validasi GC, log berada di `logs/update/YYYYMMDD/`.
 Nama file mengikuti pola `run{N}_{HHMM}.xlsx` (contoh: `run1_0930.xlsx`).
 
 Untuk **rekap** (`--recap` / menu Recap), file output ada di `logs/recap/YYYYMMDD/`
