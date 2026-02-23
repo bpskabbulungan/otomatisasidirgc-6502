@@ -50,7 +50,7 @@ def _next_run_number(date_dir, prefix):
 def build_run_log_path(*, now=None, log_type=None):
     now = now or datetime.now()
     log_type = (log_type or DEFAULT_LOG_TYPE).strip().lower()
-    if log_type not in {"run", "update"}:
+    if log_type not in {"run", "update", "validasi"}:
         log_type = DEFAULT_LOG_TYPE
     date_folder = now.strftime("%Y%m%d")
     date_dir = Path(LOGS_DIR) / log_type / date_folder

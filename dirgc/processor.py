@@ -523,7 +523,14 @@ def _normalize_hasil_label(text):
     return cleaned.strip().lower()
 
 
-def _select_hasil_gc_value(page, monitor, selector, code):
+def _select_hasil_gc_value(
+    page,
+    monitor,
+    selector,
+    code,
+    *,
+    allow_first_non_empty=False,
+):
     if code is None:
         return False
     monitor.wait_for_condition(
@@ -565,6 +572,16 @@ def _select_hasil_gc_value(page, monitor, selector, code):
                     break
         if matched_value is not None:
             monitor.bot_select_option(selector, value=matched_value)
+            return True
+    if allow_first_non_empty and options:
+        fallback_value = ""
+        for opt in options:
+            value = str(opt.get("value") or "").strip()
+            if value:
+                fallback_value = value
+                break
+        if fallback_value:
+            monitor.bot_select_option(selector, value=fallback_value)
             return True
     return False
 
@@ -652,6 +669,11 @@ def _handle_report_submit_result(page, monitor):
         "error",
         "periksa kembali",
     )
+    confirm_markers = (
+        "konfirmasi laporan",
+        "apakah anda yakin",
+        "ya, laporkan",
+    )
 
     def read_swal_message():
         try:
@@ -701,74 +723,102 @@ def _handle_report_submit_result(page, monitor):
         report_validation = _collect_report_form_validation(page)
         return bool(report_validation.get("messages"))
 
-    monitor.wait_for_condition(wait_signal, timeout_s=12)
+    for _ in range(5):
+        monitor.wait_for_condition(wait_signal, timeout_s=12)
 
-    rate_text = detect_rate_limit_popup_text(page).strip()
-    if rate_text:
-        return {
-            "ok": False,
-            "status": "error",
-            "rate_limit": True,
-            "message": rate_text,
-        }
-
-    if swal_visible():
-        popup = page.locator(".swal2-popup").first
-        swal_msg = read_swal_message()
-        popup_title = " ".join((swal_msg.get("title") or "").split())
-        popup_body = " ".join((swal_msg.get("body") or "").split())
-        popup_text = " ".join((swal_msg.get("text") or "").split())
-        combined_text = " ".join(
-            part for part in (popup_title, popup_body, popup_text) if part
-        )
-        lowered = combined_text.lower()
-        is_success = any(marker in lowered for marker in success_markers) and not any(
-            marker in lowered for marker in error_markers
-        )
-        try:
-            confirm_btn = popup.locator(".swal2-confirm")
-            if confirm_btn.count() > 0 and confirm_btn.first.is_visible():
-                monitor.bot_click(confirm_btn.first)
-        except Exception:
-            pass
-        if is_success:
+        rate_text = detect_rate_limit_popup_text(page).strip()
+        if rate_text:
             return {
-                "ok": True,
-                "status": "success",
-                "message": popup_body or popup_text or "Laporan validasi terkirim.",
+                "ok": False,
+                "status": "error",
+                "rate_limit": True,
+                "message": rate_text,
             }
-        return {
-            "ok": False,
-            "status": "gagal",
-            "message": popup_body or popup_text or "Validasi web menolak data laporan.",
-        }
 
-    report_validation = _collect_report_form_validation(page)
-    messages = report_validation.get("messages") or []
-    if messages:
-        return {
-            "ok": False,
-            "status": "gagal",
-            "message": "Validasi web: " + "; ".join(messages[:3]),
-        }
+        if swal_visible():
+            popup = page.locator(".swal2-popup").first
+            swal_msg = read_swal_message()
+            popup_title = " ".join((swal_msg.get("title") or "").split())
+            popup_body = " ".join((swal_msg.get("body") or "").split())
+            popup_text = " ".join((swal_msg.get("text") or "").split())
+            combined_text = " ".join(
+                part for part in (popup_title, popup_body, popup_text) if part
+            )
+            lowered = combined_text.lower()
 
-    form_visible = False
-    try:
-        locator = page.locator("#report_hasil_gc")
-        form_visible = locator.count() > 0 and locator.first.is_visible()
-    except Exception:
+            if any(marker in lowered for marker in confirm_markers):
+                clicked = False
+                try:
+                    confirm_btn = popup.locator(".swal2-confirm", has_text="Ya")
+                    if confirm_btn.count() > 0 and confirm_btn.first.is_visible():
+                        monitor.bot_click(confirm_btn.first)
+                        clicked = True
+                except Exception:
+                    clicked = False
+                if not clicked:
+                    try:
+                        confirm_btn = popup.locator(".swal2-confirm")
+                        if confirm_btn.count() > 0 and confirm_btn.first.is_visible():
+                            monitor.bot_click(confirm_btn.first)
+                            clicked = True
+                    except Exception:
+                        clicked = False
+                if not clicked:
+                    return {
+                        "ok": False,
+                        "status": "gagal",
+                        "message": "Dialog konfirmasi laporan tanpa tombol konfirmasi.",
+                    }
+                monitor.wait_for_condition(lambda: False, timeout_s=0.4)
+                continue
+
+            is_success = any(marker in lowered for marker in success_markers) and not any(
+                marker in lowered for marker in error_markers
+            )
+            try:
+                confirm_btn = popup.locator(".swal2-confirm")
+                if confirm_btn.count() > 0 and confirm_btn.first.is_visible():
+                    monitor.bot_click(confirm_btn.first)
+            except Exception:
+                pass
+            if is_success:
+                return {
+                    "ok": True,
+                    "status": "success",
+                    "message": popup_body or popup_text or "Laporan validasi terkirim.",
+                }
+            return {
+                "ok": False,
+                "status": "gagal",
+                "message": popup_body or popup_text or "Validasi web menolak data laporan.",
+            }
+
+        report_validation = _collect_report_form_validation(page)
+        messages = report_validation.get("messages") or []
+        if messages:
+            return {
+                "ok": False,
+                "status": "gagal",
+                "message": "Validasi web: " + "; ".join(messages[:3]),
+            }
+
         form_visible = False
-    if form_visible:
-        return {
-            "ok": False,
-            "status": "gagal",
-            "message": "Validasi web menolak data laporan (tanpa pesan detail).",
-        }
+        try:
+            locator = page.locator("#report_hasil_gc")
+            form_visible = locator.count() > 0 and locator.first.is_visible()
+        except Exception:
+            form_visible = False
+        if form_visible:
+            return {
+                "ok": False,
+                "status": "gagal",
+                "message": "Validasi web menolak data laporan (tanpa pesan detail).",
+            }
 
     return {
-        "ok": True,
-        "status": "success",
-        "message": "Laporan validasi terkirim.",
+        "ok": False,
+        "status": "error",
+        "message": "Submit laporan validasi tidak mendapatkan respons web yang jelas.",
     }
 
 def process_excel_rows(
@@ -790,8 +840,14 @@ def process_excel_rows(
     stop_on_cooldown=False,
 ):
     mode_with_update_fields = bool(update_mode or validate_report_mode)
+    if validate_report_mode:
+        run_log_type = "validasi"
+    elif update_mode:
+        run_log_type = "update"
+    else:
+        run_log_type = "run"
     run_log_path = build_run_log_path(
-        log_type="update" if mode_with_update_fields else "run"
+        log_type=run_log_type
     )
     run_log_rows = []
     try:
@@ -1446,7 +1502,11 @@ def process_excel_rows(
                     hasil_gc_before = ""
                 if (
                     _select_hasil_gc_value(
-                        page, monitor, hasil_selector, hasil_gc
+                        page,
+                        monitor,
+                        hasil_selector,
+                        hasil_gc,
+                        allow_first_non_empty=validate_report_mode,
                     )
                     if validate_report_mode
                     else hasil_gc_select(page, monitor, hasil_gc)
