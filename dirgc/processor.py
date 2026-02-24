@@ -1012,6 +1012,7 @@ def process_excel_rows(
         alamat_after = ""
         hasil_gc_before = ""
         hasil_gc_after = ""
+        gc_owner_username = ""
 
         update_fields_set = None
         if mode_with_update_fields:
@@ -1337,6 +1338,72 @@ def process_excel_rows(
                         return found
                 return pick_visible(page.locator(selector))
 
+            def extract_username_from_text(text):
+                normalized = " ".join(str(text or "").split())
+                if not normalized:
+                    return ""
+                patterns = (
+                    r"(?i)\b(?:gc\s*username|username\s*gc|user\s*gc|gc\s*oleh|digc\s*oleh|oleh\s*gc)\b\s*[:\-]?\s*([A-Za-z0-9._@-]{2,64})",
+                    r"(?i)\b(?:gc\s*by|by\s*gc)\b\s*[:\-]?\s*([A-Za-z0-9._@-]{2,64})",
+                )
+                for pattern in patterns:
+                    match = re.search(pattern, normalized)
+                    if match:
+                        return (match.group(1) or "").strip(".,;:|()[]{}")
+                if re.fullmatch(r"[A-Za-z0-9._@-]{2,64}", normalized):
+                    return normalized
+                return ""
+
+            def find_gc_owner_username():
+                attr_candidates = (
+                    "data-gc-username",
+                    "data-username-gc",
+                    "data-gc-user",
+                    "data-username",
+                )
+                for locator in (card_scope, header_locator):
+                    for attr_name in attr_candidates:
+                        try:
+                            raw = locator.get_attribute(attr_name) or ""
+                        except Exception:
+                            raw = ""
+                        username = extract_username_from_text(raw)
+                        if username:
+                            return username
+
+                selector_candidates = (
+                    "[data-gc-username]",
+                    "[data-username-gc]",
+                    ".gc-username",
+                    ".username-gc",
+                    ".gc-user",
+                    ".user-gc",
+                    ".gc-by",
+                )
+                for selector in selector_candidates:
+                    try:
+                        locator = card_scope.locator(selector)
+                        total = locator.count()
+                    except Exception:
+                        continue
+                    for idx in range(min(total, 6)):
+                        try:
+                            node = locator.nth(idx)
+                            if not node.is_visible():
+                                continue
+                            raw = node.inner_text() or ""
+                        except Exception:
+                            continue
+                        username = extract_username_from_text(raw)
+                        if username:
+                            return username
+
+                try:
+                    card_text = card_scope.inner_text() or ""
+                except Exception:
+                    card_text = ""
+                return extract_username_from_text(card_text)
+
             try:
                 header_locator.scroll_into_view_if_needed()
             except Exception:
@@ -1370,6 +1437,9 @@ def process_excel_rows(
                     else:
                         raise
                 monitor.wait_for_condition(is_card_expanded, timeout_s=6)
+
+            if update_mode:
+                gc_owner_username = find_gc_owner_username() or ""
 
             if not (update_mode or validate_report_mode):
                 if (
@@ -1436,18 +1506,31 @@ def process_excel_rows(
                         "Tombol Laporkan Hasil GC - Tidak Valid tidak ditemukan."
                     )
                 elif update_mode:
+                    owner_fragment = (
+                        f' gc_username="{gc_owner_username}".'
+                        if gc_owner_username
+                        else ""
+                    )
                     missing_note = (
                         "Tombol Edit Hasil tidak ditemukan "
-                        "(kemungkinan belum GC; gunakan menu Run)."
+                        "(kemungkinan belum GC atau GC milik user lain;"
+                        f"{owner_fragment} gunakan menu Run/Validasi GC)."
                     )
                 else:
                     missing_note = "Tombol Tandai tidak ditemukan."
-                log_warn(
-                    f"Tombol {action_label} tidak ditemukan; skipping.",
-                    idsbr=idsbr or "-",
-                )
+                if update_mode:
+                    log_info(
+                        f"Tombol {action_label} tidak ditemukan; lewati.",
+                        idsbr=idsbr or "-",
+                        gc_username=gc_owner_username or "-",
+                    )
+                else:
+                    log_warn(
+                        f"Tombol {action_label} tidak ditemukan; skipping.",
+                        idsbr=idsbr or "-",
+                    )
                 stats["skipped_no_tandai"] += 1
-                status = "gagal"
+                status = "skipped" if update_mode else "gagal"
                 note = missing_note
                 continue
 
@@ -1545,11 +1628,18 @@ def process_excel_rows(
             ):
                 locator = locate_visible(selector, scope)
                 if locator is None:
-                    log_warn(
-                        "Field tidak ditemukan; lewati.",
-                        idsbr=idsbr or "-",
-                        field=field_name,
-                    )
+                    if update_mode:
+                        log_info(
+                            "Field update tidak ditemukan; lewati (indikasi hak edit terbatas).",
+                            idsbr=idsbr or "-",
+                            field=field_name,
+                        )
+                    else:
+                        log_warn(
+                            "Field tidak ditemukan; lewati.",
+                            idsbr=idsbr or "-",
+                            field=field_name,
+                        )
                     return "", "missing", "", ""
                 def read_raw():
                     try:
@@ -1574,6 +1664,16 @@ def process_excel_rows(
                     current_value = ""
                 desired_value = _normalize_coord_text(value)
 
+                def resolve_source(actual_value, filled):
+                    if not actual_value:
+                        return "empty"
+                    if desired_value and actual_value == desired_value:
+                        if current_value == desired_value and not filled:
+                            return "excel_same_as_web"
+                        if filled:
+                            return "excel"
+                    return "web"
+
                 if allow_overwrite:
                     if desired_value:
                         filled = False
@@ -1586,14 +1686,21 @@ def process_excel_rows(
                                 filled = False
                         actual_value = read_value()
                         if actual_value:
-                            source = "excel" if filled else "web"
+                            source = resolve_source(actual_value, filled)
                             return actual_value, source, current_value, actual_value
                         if current_value:
-                            return current_value, "web", current_value, current_value
+                            source = resolve_source(current_value, False)
+                            return (
+                                current_value,
+                                source,
+                                current_value,
+                                current_value,
+                            )
                         return "", "empty", current_value, ""
 
                 if current_value:
-                    return current_value, "web", current_value, current_value
+                    source = resolve_source(current_value, False)
+                    return current_value, source, current_value, current_value
                 if not desired_value:
                     return "", "empty", current_value, ""
                 monitor.mark_activity("bot")
@@ -1605,7 +1712,7 @@ def process_excel_rows(
                     filled = False
                 actual_value = read_value()
                 if actual_value:
-                    source = "excel" if filled else "web"
+                    source = resolve_source(actual_value, filled)
                     return actual_value, source, current_value, actual_value
                 return "", "empty", current_value, ""
 
@@ -1638,11 +1745,18 @@ def process_excel_rows(
                 desired_value = str(value).strip() if value else ""
                 toggle = locate_visible(toggle_selector, scope)
                 if toggle is None:
-                    log_warn(
-                        "Toggle edit tidak ditemukan; lewati.",
-                        idsbr=idsbr or "-",
-                        field=field_name,
-                    )
+                    if update_mode:
+                        log_info(
+                            "Toggle edit tidak ditemukan; lewati (indikasi hak edit terbatas).",
+                            idsbr=idsbr or "-",
+                            field=field_name,
+                        )
+                    else:
+                        log_warn(
+                            "Toggle edit tidak ditemukan; lewati.",
+                            idsbr=idsbr or "-",
+                            field=field_name,
+                        )
                     return "", ""
                 try:
                     toggle_checked = toggle.is_checked()
@@ -1662,21 +1776,35 @@ def process_excel_rows(
 
                 input_locator = locate_visible(input_selector, scope)
                 if input_locator is None:
-                    log_warn(
-                        "Field edit tidak ditemukan; lewati.",
-                        idsbr=idsbr or "-",
-                        field=field_name,
-                    )
+                    if update_mode:
+                        log_info(
+                            "Field edit tidak ditemukan; lewati (indikasi hak edit terbatas).",
+                            idsbr=idsbr or "-",
+                            field=field_name,
+                        )
+                    else:
+                        log_warn(
+                            "Field edit tidak ditemukan; lewati.",
+                            idsbr=idsbr or "-",
+                            field=field_name,
+                        )
                     return "", ""
                 if not monitor.wait_for_condition(
                     lambda: input_locator.is_editable(),
                     timeout_s=5,
                 ):
-                    log_warn(
-                        "Field edit tidak bisa diedit; lewati.",
-                        idsbr=idsbr or "-",
-                        field=field_name,
-                    )
+                    if update_mode:
+                        log_info(
+                            "Field edit tidak bisa diedit; lewati (indikasi hak edit terbatas).",
+                            idsbr=idsbr or "-",
+                            field=field_name,
+                        )
+                    else:
+                        log_warn(
+                            "Field edit tidak bisa diedit; lewati.",
+                            idsbr=idsbr or "-",
+                            field=field_name,
+                        )
                     return "", ""
                 try:
                     current_value = input_locator.input_value()
@@ -1760,12 +1888,29 @@ def process_excel_rows(
             if submit_locator is None:
                 submit_locator = locate_visible(submit_selector)
             if submit_locator is None:
-                log_warn(
-                    "Tombol submit tidak ditemukan; skipping.",
-                    idsbr=idsbr or "-",
-                )
-                status = "gagal"
-                note = "Tombol submit tidak ditemukan"
+                if update_mode:
+                    log_info(
+                        "Tombol submit update tidak terlihat; lewati (kemungkinan GC milik user lain).",
+                        idsbr=idsbr or "-",
+                        gc_username=gc_owner_username or "-",
+                    )
+                    status = "skipped"
+                    owner_note = (
+                        f' (gc_username: "{gc_owner_username}")'
+                        if gc_owner_username
+                        else ""
+                    )
+                    note = (
+                        "Update dilewati: hasil GC milik user lain"
+                        f"{owner_note}; gunakan menu Validasi GC."
+                    )
+                else:
+                    log_warn(
+                        "Tombol submit tidak ditemukan; skipping.",
+                        idsbr=idsbr or "-",
+                    )
+                    status = "gagal"
+                    note = "Tombol submit tidak ditemukan"
                 monitor.bot_goto(TARGET_URL)
                 continue
 
