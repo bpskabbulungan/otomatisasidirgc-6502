@@ -20,7 +20,6 @@ from .browser import (
 )
 from .credentials import load_credentials
 from .logging_utils import log_info, log_warn
-from .vpn import ensure_vpn_connected
 from .processor import process_excel_rows
 from .recap import run_recap
 from .settings import (
@@ -40,7 +39,6 @@ from .settings import (
     RATE_LIMIT_PROFILES,
     RECAP_LENGTH_MAX,
     RECAP_LENGTH_WARN_THRESHOLD,
-    DEFAULT_VPN_PREFIXES,
     SUBMIT_MODES,
 )
 
@@ -271,8 +269,8 @@ def build_parser():
     parser.add_argument(
         "--vpn-prefixes",
         help=(
-            "Prefix IP VPN yang dianggap valid (contoh: 10.,172.16.). "
-            "Pisahkan dengan koma."
+            "Argumen kompatibilitas lama; tidak lagi dipakai "
+            "untuk validasi VPN."
         ),
     )
     parser.add_argument(
@@ -352,12 +350,8 @@ def run_dirgc(
     recap_resume=True,
     recap_backup_every=10,
 ):
-    prefixes = None
-    if isinstance(vpn_prefixes, str) and vpn_prefixes.strip():
-        prefixes = [item.strip() for item in vpn_prefixes.split(",")]
-    elif isinstance(DEFAULT_VPN_PREFIXES, (list, tuple)):
-        prefixes = list(DEFAULT_VPN_PREFIXES)
-    ensure_vpn_connected(prefixes)
+    # Retained for backward compatibility; VPN validation has been removed.
+    _ = vpn_prefixes
     ensure_playwright_browsers()
     apply_rate_limit_profile(rate_limit_profile)
     if validate_gc_mode and update_mode:
